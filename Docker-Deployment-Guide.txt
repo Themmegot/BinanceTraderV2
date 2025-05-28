@@ -1,0 +1,105 @@
+# 🐳 Docker-Based Local Deployment Guide
+
+This guide shows you how to run the Flask app, Celery worker, and Redis server locally using Docker and Docker Compose.
+
+---
+
+## 🧱 Folder Structure
+Ensure your project has:
+
+```
+.
+├── app/
+├── run.py
+├── celery_worker.py
+├── requirements.txt
+├── .env
+├── docker-compose.yml
+├── Dockerfile
+```
+
+---
+
+## 📝 Dockerfile
+Create a file named `Dockerfile`:
+
+```Dockerfile
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /usr/src/app
+
+# Copy source files
+COPY . .
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Default command
+CMD ["python", "run.py"]
+```
+
+---
+
+## 🧩 docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - .:/usr/src/app
+
+  worker:
+    build: .
+    command: celery -A celery_worker.celery worker --loglevel=info
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    volumes:
+      - .:/usr/src/app
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+```
+
+---
+
+## 🚀 Start the System
+
+```bash
+docker-compose up --build
+```
+
+- Flask app: http://localhost:5000
+- Redis: exposed on port 6379 (internal use only)
+- Celery worker: runs in background
+
+---
+
+## ✅ Notes
+- Place your `.env` file in the project root.
+- All logs are printed to the Docker terminal output.
+- To rebuild containers after changes:
+  ```bash
+  docker-compose down
+  docker-compose up --build
+  ```
+
+---
+
+You're now running the full stack locally with Flask + Celery + Redis, Dockerized for reliability and reproducibility!

@@ -1,0 +1,10 @@
+Flask>=2.3.0
+python-dotenv>=1.0.0
+celery>=5.3.0
+redis>=4.5.0
+python-binance>=1.0.17
+pydantic>=2.0.0
+
+# Optional but useful
+requests>=2.31.0
+pytest>=7.4.0
