@@ -163,3 +163,4 @@ nohup.out
 json.txt
 transactions.csv
 app/._init.py
+.DS_Store
