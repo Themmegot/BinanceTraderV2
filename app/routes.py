@@ -40,7 +40,7 @@ def webhook():
             handle_switch_trade_task.delay(payload.dict())
             return jsonify({"code": "success", "message": "Switch trade task submitted"}), 202
 
-        elif payload.strategy.order_id.lower().startswith("exit"):
+        elif payload.strategy.order_id.lower().startswith(("exit", "flat")):
             handle_exit_trade_task.delay(payload.dict())
             return jsonify({"code": "success", "message": "Exit trade task submitted"}), 202
 

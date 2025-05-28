@@ -4,8 +4,16 @@ from typing import Optional, Literal
 
 class StrategyData(BaseModel):
     order_id: str
-    order_action: Literal["BUY", "SELL", "EXIT"]
+    order_action: str  # We'll normalize this below
 
+    @model_validator(mode="after")
+    def normalize_order_action(cls, data: "StrategyData") -> "StrategyData":
+        action = data.order_action.upper()
+        if action == "FLAT":
+            data.order_action = "EXIT"
+        elif action not in {"BUY", "SELL", "EXIT"}:
+            raise ValueError(f"Invalid order_action: {action}")
+        return data
 
 class BarData(BaseModel):
     order_price: float
@@ -88,7 +96,18 @@ class WebhookData(BaseModel):
                             "order_action": "EXIT"
                         }
                     }
+                },
+                {
+                "summary": "Flat order example",
+                "value": {
+                    "passphrase": "your_webhook_passphrase",
+                    "ticker": "BTCUSDT",
+                    "strategy": {
+                    "order_id": "Flat Everything",
+                    "order_action": "FLAT"
+                    }
                 }
+            }
             ]
         }
     }
