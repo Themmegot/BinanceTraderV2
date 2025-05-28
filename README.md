@@ -146,5 +146,3 @@ FLASK_DEBUG=true
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/0
 ```
-
-Let me know if you'd like help with GitHub setup, CI/CD, or exposing this securely online (e.g., using ngrok or NGINX + SSL).
