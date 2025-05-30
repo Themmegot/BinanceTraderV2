@@ -3,7 +3,7 @@ from flask import Blueprint, request, jsonify, render_template
 from app.config import Config
 from app.logger import configure_logging
 from app.validators import WebhookData
-from app.tasks import handle_switch_trade_task, handle_exit_trade_task
+from app.tasks import handle_enter_trade_task, handle_exit_trade_task
 import logging
 
 bp = Blueprint('trading', __name__)
@@ -37,7 +37,7 @@ def webhook():
         logger.info(f"Valid webhook request received: {payload.dict()}")
 
         if payload.strategy.order_id.lower().startswith("switch"):
-            handle_switch_trade_task.delay(payload.dict())
+            handle_enter_trade_task.delay(payload.dict())
             return jsonify({"code": "success", "message": "Switch trade task submitted"}), 202
 
         elif payload.strategy.order_id.lower().startswith(("exit", "flat")):

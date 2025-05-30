@@ -6,11 +6,11 @@ from decimal import Decimal
 logger = logging.getLogger('main_logger')
 error_logger = logging.getLogger('error_logger')
 
-@celery.task(name='handle_switch_trade')
-def handle_switch_trade_task(payload):
+@celery.task(name='handle_enter_trade')
+def handle_enter_trade_task(payload):
     try:
         bh = BinanceHelper()
-        bh.handle_switch_trade(payload)
+        bh.handle_enter_trade(payload)
         logger.info("Switch trade executed via Celery")
     except Exception as e:
         error_logger.error(f"Switch trade task failed: {e}")

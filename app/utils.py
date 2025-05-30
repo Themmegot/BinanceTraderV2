@@ -140,7 +140,7 @@ class BinanceHelper:
         except Exception as e:
             error_logger.error(f"Fallback MARKET order failed: {e}")
 
-    def handle_switch_trade(self, payload):
+    def handle_enter_trade(self, payload):
         ticker = payload['ticker']
         action = payload['strategy']['order_action'].upper()
         order_price = Decimal(str(payload['bar']['order_price']))

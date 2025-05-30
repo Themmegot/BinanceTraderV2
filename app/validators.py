@@ -56,7 +56,7 @@ class WebhookData(BaseModel):
                         "leverage": 20,
                         "percent_of_equity": 25,
                         "strategy": {
-                            "order_id": "Switch Long",
+                            "order_id": "Enter Long",
                             "order_action": "BUY"
                         },
                         "bar": {
@@ -75,7 +75,7 @@ class WebhookData(BaseModel):
                         "leverage": 50,
                         "percent_of_equity": 10,
                         "strategy": {
-                            "order_id": "Switch Short",
+                            "order_id": "Enter Short",
                             "order_action": "SELL"
                         },
                         "bar": {
