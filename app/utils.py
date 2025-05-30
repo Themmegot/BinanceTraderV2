@@ -52,7 +52,7 @@ class BinanceHelper:
     def log_transaction(self, *args):
         log_dir = "logs"
         os.makedirs(log_dir, exist_ok=True)  # ensure logs directory exists
-        
+
         if not os.path.exists("transactions.csv"):
             with open("transactions.csv", "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
@@ -171,8 +171,24 @@ class BinanceHelper:
             timeInForce='GTC'
         )
 
-        logger.info(f"Switch trade order submitted: {order['orderId']} for {ticker} at {adjusted_price} with qty {adjusted_qty}")
+        logger.info(f"Enter trade order submitted: {order['orderId']} for {ticker} at {adjusted_price} with qty {adjusted_qty}")
         self.poll_order_status(ticker, order['orderId'], action, adjusted_qty, adjusted_price, leverage)
+
+        # Writing transaction out to transaction.cvs
+        commission, asset = self.fetch_order_commission(ticker, order['orderId'])
+
+        self.log_transaction(
+            "ENTER",
+            str(notional),
+            "USDT",
+            str(adjusted_qty),
+            ticker.replace("USDT", ""),
+            str(commission),
+            asset,
+            ticker,
+            f"Order {order['orderId']}"
+        )
+
 
     def handle_exit_trade(self, payload):
         ticker = payload['ticker']
