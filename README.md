@@ -105,7 +105,7 @@ Send POST requests from TradingView using this schema:
 ```
 
 - `order_action`: `"BUY"`, `"SELL"`, `"EXIT"`, or `"FLAT"` (alias for exit)
-- `EXIT` requires only `passphrase`, `ticker`, and `strategy`
+- `EXIT` requires only `passphrase`, `ticker`, and `strategy.order.action`
 
 ---
 
