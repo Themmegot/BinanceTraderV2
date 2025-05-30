@@ -45,7 +45,7 @@ class WebhookData(BaseModel):
         return data
 
     model_config = {
-        "extra": "forbid",
+        "extra": "ignore",
         "json_schema_extra": {
             "examples": [
                 {
