@@ -12,6 +12,8 @@ services:
       - redis
     environment:
       - FLASK_RUN_HOST=0.0.0.0
+    volumes:
+      - ./logs:/app/logs
 
   worker:
     build: .
@@ -20,7 +22,9 @@ services:
       - .env
     depends_on:
       - redis
-
+    volumes:
+      - ./logs:/app/logs
+      
   redis:
     image: redis:7
     volumes:

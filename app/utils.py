@@ -50,6 +50,9 @@ class BinanceHelper:
         return f"{Decimal(value):.{precision}f}"
 
     def log_transaction(self, *args):
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)  # ensure logs directory exists
+        
         if not os.path.exists("transactions.csv"):
             with open("transactions.csv", "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
