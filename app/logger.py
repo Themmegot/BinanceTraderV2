@@ -18,7 +18,7 @@ def configure_logging():
     error_logger.addHandler(stream_handler)
 
     # Optional: also log to a file
-    file_handler = logging.FileHandler('app.log')
+    file_handler = logging.FileHandler('/tmp/app.log')
     file_handler.setFormatter(formatter)
     main_logger.addHandler(file_handler)
     error_logger.addHandler(file_handler)
