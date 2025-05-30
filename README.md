@@ -88,15 +88,15 @@ Send POST requests from TradingView using this schema:
 ```json
 {
   "passphrase": "your_webhook_pass",
-  "ticker": "BTCUSDT",
+  "ticker": "{{ticker}} ",
   "leverage": 20,
   "percent_of_equity": 25,
   "strategy": {
-    "order_id": "Enter Long",
-    "order_action": "BUY"
+    "order_id": "{{strategy.market_position}}",
+    "order_action": "{{strategy.order.action}}"
   },
   "bar": {
-    "order_price": 108637.0
+    "order_price": "{{close}}"
   },
   "take_profit_percent": 10,
   "stop_loss_percent": 3,
