@@ -11,9 +11,9 @@ def handle_enter_trade_task(payload):
     try:
         bh = BinanceHelper()
         bh.handle_enter_trade(payload)
-        logger.info("Switch trade executed via Celery")
+        logger.info("Enter trade executed via Celery")
     except Exception as e:
-        error_logger.error(f"Switch trade task failed: {e}")
+        error_logger.error(f"Enter trade task failed: {e}")
 
 
 @celery.task(name='handle_exit_trade')
