@@ -36,9 +36,9 @@ def webhook():
     try:
         logger.info(f"Valid webhook request received: {payload.dict()}")
 
-        if payload.strategy.order_id.lower().startswith("switch"):
+        if payload.strategy.order_id.lower().startswith("enter"):
             handle_enter_trade_task.delay(payload.dict())
-            return jsonify({"code": "success", "message": "Switch trade task submitted"}), 202
+            return jsonify({"code": "success", "message": "Enter trade task submitted"}), 202
 
         elif payload.strategy.order_id.lower().startswith(("exit", "flat")):
             handle_exit_trade_task.delay(payload.dict())
