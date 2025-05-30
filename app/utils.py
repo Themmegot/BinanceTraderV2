@@ -216,3 +216,18 @@ class BinanceHelper:
         )
 
         logger.info(f"Exit trade executed for {ticker} with qty {adjusted_qty}")
+
+        # Writing transaction out to transaction.cvs
+        commission, asset = self.fetch_order_commission(ticker, order['orderId'])
+
+        self.log_transaction(
+            "EXIT",
+            str(notional),
+            "USDT",
+            str(adjusted_qty),
+            ticker.replace("USDT", ""),
+            str(commission),
+            asset,
+            ticker,
+            f"Order {order['orderId']}"
+        )
