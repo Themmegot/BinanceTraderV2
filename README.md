@@ -1,148 +1,157 @@
-### 1. README.md (Docker Deployment)
+# BinanceTrader 🧠📈
 
-```markdown
-# Binance Flask Trading Webhook
+A lightweight, containerized, Flask + Celery-based webhook trading system designed for algorithmic strategies on Binance via TradingView alerts. Built to run on a Raspberry Pi or any Docker-compatible system.
 
-This project is a Flask-based webhook service connected to Binance for automated trading. It uses Celery for background job processing and Docker Compose for container orchestration.
+## 🌟 Features
 
-## Features
-- Flask API with `/webhook` route
-- Pydantic validation of trading signals
-- Celery for background task handling
-- Redis as Celery broker
-- Dockerized deployment
+- 🔐 Webhook-secured strategy execution
+- 🔄 Long and short entries with full exit logic
+- 🧮 Leverage, equity percent, and price control per trade
+- 🛑 Integrated SL/TP and trailing stop mechanisms
+- 🧾 Automatic transaction logging (`transactions.csv`)
+- 📊 Logging system with persistent `info.log` and `errors.log`
+- ⚙️ Configurable via `.env` file
+- 🐳 Dockerized: run anywhere, reliably
+- 🧪 Testnet support with `USE_TESTNET`
+- 🧰 Built-in input validation with Pydantic
+- 🔁 Redis + Celery asynchronous task queuing
+- 💼 Production-ready with Gunicorn
 
 ---
 
-## 📦 Project Structure
+## 🗂 Project Structure
 
 ```
-.
-├── app/
-│   ├── __init__.py
-│   ├── routes.py
-│   ├── validators.py
-│   ├── binance_utils.py
+BinanceTraderV2/
+│
+├── app/                   # Flask app and business logic
+│   ├── __init__.py        # Flask app factory
+│   ├── config.py          # Configuration loader
+│   ├── extensions.py      # Celery, Redis, Logging setup
+│   ├── logger.py          # Logging configuration
+│   ├── routes.py          # Webhook endpoint
+│   ├── tasks.py           # Celery tasks (enter/exit)
+│   ├── utils.py           # Binance trade logic & transaction CSV writer
+│   ├── validators.py      # Pydantic validation models
 │   └── templates/
-│       └── index.html
-├── celery_worker.py
-├── run.py
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-└── .env
+│       └── index.html     # Basic index page
+│
+├── redis.conf             # Custom Redis config
+├── run.py                 # Entry point for Gunicorn + Flask
+├── celery_worker.py       # Celery app entry point
+├── requirements.txt       # Python dependencies
+├── Dockerfile             # Docker build
+├── docker-compose.yml     # Container stack
+├── env.example            # Example .env file
+└── README.md              # You're here :)
 ```
 
 ---
 
-## 🚀 Quickstart (Docker)
+## ⚙️ Setup
 
-1. **Clone the repo**
+### 1. Clone the repository
+
 ```bash
-git clone https://github.com/your-repo/binance-trader
-cd binance-trader
+git clone https://github.com/your-username/BinanceTraderV2.git
+cd BinanceTraderV2
 ```
 
-2. **Set environment variables**
+### 2. Configure your `.env`
+
+Copy `env.example` to `.env` and fill in:
+
+```env
+API_KEY=your_api_key
+API_SECRET=your_api_secret
+USE_TESTNET=true
+WEBHOOK_PASSPHRASE=your_webhook_pass
+```
+
+### 3. Start the application
+
 ```bash
-cp .env.example .env
-# Then edit .env with your real credentials
+sudo docker-compose up --build -d
 ```
 
-3. **Build and start the containers**
-```bash
-docker compose up --build
-```
+### 4. Access the server
 
-4. **Access the web interface**
-```
-http://localhost:5000
-```
+- Webhook endpoint: `http://<your-ip>:5001/webhook`
+- Index page: `http://<your-ip>:5001/`
 
-5. **Test webhook** (e.g., via Insomnia or curl)
-```
-POST http://localhost:5000/webhook
-Content-Type: application/json
+---
 
+## 📤 Webhook Payload Format
+
+Send POST requests from TradingView using this schema:
+
+```json
 {
-  "passphrase": "example_passphrase",
+  "passphrase": "your_webhook_pass",
   "ticker": "BTCUSDT",
-  "leverage": 50,
-  "percent_of_equity": 10,
+  "leverage": 20,
+  "percent_of_equity": 25,
   "strategy": {
-    "order_id": "Long Entry",
+    "order_id": "Enter Long",
     "order_action": "BUY"
   },
   "bar": {
-    "order_price": 108500.0
+    "order_price": 108637.0
   },
-  "take_profit_percent": 15,
-  "stop_loss_percent": 5,
+  "take_profit_percent": 10,
+  "stop_loss_percent": 3,
   "trailing_stop_percentage": 2
 }
 ```
 
----
-
-## 🧪 Testing Celery
-Ensure the worker starts correctly:
-```bash
-docker compose logs -f worker
-```
+- `order_action`: `"BUY"`, `"SELL"`, `"EXIT"`, or `"FLAT"` (alias for exit)
+- `EXIT` requires only `passphrase`, `ticker`, and `strategy`
 
 ---
 
-## 🛠️ Developer Notes
-- The `validators.py` file contains the Pydantic models used to validate incoming webhook data.
-- `binance_utils.py` contains the Binance trading logic.
+## 📦 Volumes and Logging
+
+All persistent logs and CSVs are written to `./logs/`:
+
+- `logs/info.log` — General logs
+- `logs/errors.log` — Errors
+- `logs/transactions.csv` — Trade history
+
+You can optionally mount the `logs/` directory for persistence across container rebuilds.
 
 ---
 
-## 🔐 Security
-Make sure your `.env` file is not committed to version control!
-Add to `.gitignore`:
-```
-.env
-```
-```
+## 🔒 Security
+
+- Webhook access protected by a shared secret (`passphrase`)
+- Redis is bound to `127.0.0.1`
+- Dangerous Redis commands disabled in `redis.conf`
 
 ---
 
-### 2. requirements.txt
+## 🧠 Tips
 
-```txt
-flask==3.0.2
-python-dotenv==1.0.1
-pydantic==2.6.4
-celery==5.3.6
-redis==5.0.4
-requests==2.31.0
-```
+- Set up `logrotate` to prevent uncontrolled growth of logs
+- Use `--uid` option in Docker or avoid running as root for Celery
+- Production settings already use Gunicorn for `web` service
 
 ---
 
-### 3. .env.example
+## 🐳 Docker Tips
 
-```env
-# Binance API configuration
-USE_TESTNET=true
+- View logs: `docker-compose logs -f`
+- Restart stack: `docker-compose restart`
+- Stop all: `docker-compose down`
+- Monitor containers: `docker ps`
 
-# Testnet keys
-API_KEY_TEST=your_testnet_api_key
-API_SECRET_TEST=your_testnet_api_secret
+---
 
-# Mainnet keys (used when USE_TESTNET=false)
-API_KEY=your_mainnet_api_key
-API_SECRET=your_mainnet_api_secret
+## ✨ Credits
 
-# Webhook passphrase for validation
-WEBHOOK_PASSPHRASE=example_passphrase
+Built with ❤️ by Børge and ChatGPT — a brilliant blend of human logic and AI precision.
 
-# Optional settings
-BINANCE_TLD=com
-FLASK_DEBUG=true
+---
 
-# Celery / Redis broker
-CELERY_BROKER_URL=redis://redis:6379/0
-CELERY_RESULT_BACKEND=redis://redis:6379/0
-```
+## 📜 License
+
+MIT — feel free to use, fork, improve!
