@@ -18,3 +18,5 @@ class Config:
     BINANCE_TLD = os.getenv('BINANCE_TLD', 'com')
     MIN_NOTIONAL = 5  # Minimum notional value required
     FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
+
