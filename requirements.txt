@@ -4,6 +4,7 @@ celery>=5.3.0
 redis>=4.5.0
 python-binance>=1.0.17
 pydantic>=2.0.0
+gunicorn
 
 # Optional but useful
 requests>=2.31.0
