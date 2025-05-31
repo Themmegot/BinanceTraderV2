@@ -1,5 +1,4 @@
 import logging
-import time
 import os
 import csv
 from decimal import Decimal, ROUND_DOWN
@@ -23,7 +22,6 @@ error_logger = logging.getLogger('error_logger')
 
 class BinanceHelper:
     def __init__(self):
-        # Initialize the Binance futures client (testnet or live)
         if Config.USE_TESTNET:
             self.client = Client(Config.API_KEY, Config.API_SECRET, testnet=True)
             self.client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
@@ -31,9 +29,6 @@ class BinanceHelper:
             self.client = Client(Config.API_KEY, Config.API_SECRET, tld=Config.BINANCE_TLD)
 
     def get_symbol_info(self, ticker):
-        """
-        Fetch symbol filters (tickSize, stepSize, pricePrecision, quantityPrecision).
-        """
         exchange_info = self.client.futures_exchange_info()
         symbol_info = next((s for s in exchange_info['symbols'] if s['symbol'] == ticker), None)
         if not symbol_info:
@@ -49,44 +44,116 @@ class BinanceHelper:
         }
 
     def adjust_to_step(self, value, step_size):
-        """
-        Round 'value' down to the nearest multiple of 'step_size'.
-        """
         value = Decimal(value)
         adjusted = (value // step_size) * step_size
         precision = abs(step_size.as_tuple().exponent)
         return adjusted.quantize(Decimal(f'1e-{precision}'), rounding=ROUND_DOWN)
 
     def format_val(self, value, precision):
-        """
-        Format a Decimal 'value' to a string with 'precision' decimal places.
-        """
         return f"{Decimal(value):.{precision}f}"
 
     def log_transaction(self, *args):
         """
-        Append a transaction line to 'transactions.csv' inside a 'logs/' folder.
-        """
-        log_dir = "logs"
-        os.makedirs(log_dir, exist_ok=True)
+        Writes a single row to 'transactions.csv' that matches kryptosekken’s
+        “Generisk CSV” format:
 
-        csv_path = os.path.join(log_dir, "transactions.csv")
+        Columns (exactly in this order):
+          Dato,Kvantitet mottatt,Valuta mottatt,
+          Kvantitet sendt,Valuta sendt,
+          Gebyr beløp,Gebyr valuta,
+          Transaksjonstype,Notat
+
+        We infer the mapping from the existing arguments:
+          args[0] = "ENTER" or "EXIT"  → Transaksjonstype
+          args[1] = notional (string)  → USDT amount sent/received
+          args[2] = the “sent asset”  → e.g. "USDT"
+          args[3] = quantity (string)  → BTC amount sent/received
+          args[4] = the “received asset” → e.g. "BTC"
+          args[5] = commission (string) → fee amount
+          args[6] = commission asset    → fee currency ("USDT", etc.)
+          args[7] = market/pair         → e.g. "BTCUSDT" (ignored in final CSV)
+          args[8] = note (string)       → e.g. "Order 4474211572"
+
+        From that:
+          - If Transaksjonstype == "ENTER", then we “send USDT” and “receive BTC.”
+          - If Transaksjonstype == "EXIT",  then we “send BTC” and “receive USDT.”
+        We format date as "DD.MM.YYYY HH:MM:SS" and write one combined row.
+        """
+        # Kryptosekken’s exact header (must be in this order):
+        header = [
+            "Dato",
+            "Kvantitet mottatt",
+            "Valuta mottatt",
+            "Kvantitet sendt",
+            "Valuta sendt",
+            "Gebyr beløp",
+            "Gebyr valuta",
+            "Transaksjonstype",
+            "Notat"
+        ]
+
+        csv_dir = "logs"
+        os.makedirs(csv_dir, exist_ok=True)
+        csv_path = os.path.join(csv_dir, "transactions.csv")
+
+        # If file does not exist yet, write header row first
         if not os.path.exists(csv_path):
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    "Tidspunkt", "Type", "Inn", "Inn-Valuta", "Ut", "Ut-Valuta",
-                    "Gebyr", "Gebyr-Valuta", "Marked", "Notat"
-                ])
+                writer.writerow(header)
 
+        # Unpack the incoming arguments
+        # (As described above in the docstring.)
+        (
+            tx_type,           # "ENTER" or "EXIT"
+            notional_str,      # e.g. "40460.68000"
+            sent_asset,        # e.g. "USDT"
+            qty_str,           # e.g. "0.391"
+            received_asset,    # e.g. "BTC"
+            fee_str,           # e.g. "8.09213600"
+            fee_asset,         # e.g. "USDT"
+            market_pair,       # e.g. "BTCUSDT" (not used in final CSV)
+            note               # e.g. "Order 4474211572"
+        ) = args
+
+        # Determine “received” vs “sent” amounts for kryptosekken’s columns
+        # If tx_type == "ENTER", we “sent” USDT (notional_str) and “received” BTC (qty_str).
+        # If tx_type == "EXIT", we “sent” BTC (qty_str) and “received” USDT (notional_str).
+
+        if tx_type.upper() == "ENTER":
+            qty_received      = qty_str
+            asset_received    = received_asset        # e.g. "BTC"
+            qty_sent          = notional_str
+            asset_sent        = sent_asset            # e.g. "USDT"
+        else:  # "EXIT"
+            qty_received      = notional_str
+            asset_received    = sent_asset            # e.g. "USDT"
+            qty_sent          = qty_str
+            asset_sent        = received_asset        # e.g. "BTC"
+
+        # Format the timestamp (“Dato”) as "DD.MM.YYYY HH:MM:SS"
+        now_utc = datetime.utcnow()
+        date_str = now_utc.strftime("%d.%m.%Y %H:%M:%S")
+
+        # Prepare the row in the exact column order required
+        row = [
+            date_str,             # Dato
+            qty_received,         # Kvantitet mottatt
+            asset_received,       # Valuta mottatt
+            qty_sent,             # Kvantitet sendt
+            asset_sent,           # Valuta sendt
+            fee_str,              # Gebyr beløp
+            fee_asset,            # Gebyr valuta
+            tx_type.lower(),      # Transaksjonstype  (e.g. "enter" or "exit" or "trade")
+            note                  # Notat
+        ]
+
+        # Append this row
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), *args])
+            writer.writerow(row)
 
     def fetch_order_commission(self, ticker, order_id):
-        """
-        Retrieve the total commission and commission asset for a given order ID.
-        """
         try:
             trades = self.client.futures_account_trades(symbol=ticker, orderId=order_id)
             total_commission = Decimal("0")
@@ -102,9 +169,6 @@ class BinanceHelper:
             return Decimal("0"), ""
 
     def cancel_related_orders(self, ticker):
-        """
-        Cancel any open TAKE_PROFIT_MARKET, STOP_MARKET, or TRAILING_STOP_MARKET orders for 'ticker'.
-        """
         try:
             open_orders = self.client.futures_get_open_orders(symbol=ticker)
             for order in open_orders:
@@ -185,7 +249,6 @@ class BinanceHelper:
 
             time.sleep(poll_interval)
 
-
     def poll_order_status(
         self,
         ticker,
@@ -199,13 +262,6 @@ class BinanceHelper:
         trailing_stop_percentage=None,
         max_wait=300
     ):
-        """
-        Poll the LIMIT entry order (ID=order_id) every 15 seconds until one of:
-          - status == FILLED   → log commission, return
-          - status in [CANCELED, REJECTED, EXPIRED] → log and return
-          - timeout (elapsed >= max_wait) → cancel LIMIT, send fallback MARKET to enter
-        """
-
         elapsed = 0
         interval = 15
 
@@ -213,13 +269,11 @@ class BinanceHelper:
             try:
                 status = self.client.futures_get_order(symbol=ticker, orderId=order_id)['status']
                 if status == 'FILLED':
-                    # Entry is filled: wait a moment, log commission, and return.
                     time.sleep(5)
                     commission, asset = self.fetch_order_commission(ticker, order_id)
                     logger.info(f"Order {order_id} filled. Commission: {commission} {asset}")
                     return
                 elif status in ['CANCELED', 'REJECTED', 'EXPIRED']:
-                    # The LIMIT was canceled, rejected, or expired: log and exit.
                     logger.info(f"Order {order_id} status: {status}. Exiting poll.")
                     return
             except Exception as e:
@@ -229,26 +283,18 @@ class BinanceHelper:
             time.sleep(interval)
             elapsed += interval
 
-        # If we reach this point, the LIMIT never filled within `max_wait` seconds.
-        # Cancel the original LIMIT and send a fallback MARKET entry (without reduceOnly).
         logger.warning(f"Order {order_id} not filled in time. Cancelling and sending fallback MARKET order.")
         try:
-            # Cancel the stale LIMIT
             self.client.futures_cancel_order(symbol=ticker, orderId=order_id)
-
-            # Place a MARKET order to enter the position.
-            # Note: remove reduceOnly=True so that this MARKET can actually open (or flip) a position.
             self.client.futures_create_order(
                 symbol=ticker,
                 side=action,
                 type=FUTURE_ORDER_TYPE_MARKET,
                 quantity=self.format_val(quantity, self.get_symbol_info(ticker)['quantity_precision'])
-                # ← no reduceOnly=True here
             )
             logger.info(f"Fallback MARKET order for {ticker} placed.")
         except Exception as e:
             error_logger.error(f"Fallback MARKET order failed: {e}")
-
 
     def handle_enter_trade(self, payload):
         """
