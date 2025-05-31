@@ -587,6 +587,9 @@ class BinanceHelper:
         action     = payload["strategy"]["order_action"].upper()  # “SELL” if closing a long, “BUY” if closing a short
 
         if is_futures:
+            # CANCEL any previous TP/SL/TS before we sell at market
+            self.cancel_related_orders(ticker)
+            
             # ----------------
             #  FUTURES EXIT
             # ----------------
