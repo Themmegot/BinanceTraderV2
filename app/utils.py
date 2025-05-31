@@ -522,20 +522,22 @@ class BinanceHelper:
                 f"{filled_qty:.8f}",            # Inn = BTC received
                 ticker.replace("USDT", ""),     # Inn‐Valuta = "BTC"
                 f"{entry_notional:.8f}",        # Ut = USDT spent
-                "USDT",                          # Ut‐Valuta
+                "USDT",                         # Ut‐Valuta
                 f"{commission:.8f}",
                 fee_asset,
-                ticker,                          # Marked = "BTCUSDT"
+                ticker,                         # Marked = "BTCUSDT"
                 f"Order {entry_id}"
             )
 
             # 7) Cancel any lingering TP/SL/TS from a previous position
             self.cancel_related_orders(ticker)
 
-            # 8) Place FUTURES STOP_MARKET (SL) if requested
+            # 8) Place FUTURES STOP_MARKET (SL) if requested, using ROI% logic
             if sl_pct > 0:
                 if action == "BUY":
-                    sl_price = (filled_price * (Decimal("1") - sl_pct)).quantize(
+                    # For a long: price must drop by (sl_pct / leverage)
+                    price_factor = Decimal("1") - (sl_pct / leverage)
+                    sl_price = (filled_price * price_factor).quantize(
                         symbol_info['tick_size'], rounding=ROUND_DOWN
                     )
                     stop_order = self.client.futures_create_order(
@@ -546,8 +548,10 @@ class BinanceHelper:
                         closePosition=True
                     )
                     logger.info(f"Placed FUTURES SL_MARKET at {sl_price} (ID={stop_order['orderId']})")
-                else:  # short entry
-                    sl_price = (filled_price * (Decimal("1") + sl_pct)).quantize(
+                else:
+                    # For a short: price must rise by (sl_pct / leverage)
+                    price_factor = Decimal("1") + (sl_pct / leverage)
+                    sl_price = (filled_price * price_factor).quantize(
                         symbol_info['tick_size'], rounding=ROUND_DOWN
                     )
                     stop_order = self.client.futures_create_order(
@@ -559,10 +563,12 @@ class BinanceHelper:
                     )
                     logger.info(f"Placed FUTURES SL_MARKET at {sl_price} (ID={stop_order['orderId']})")
 
-            # 9) Place FUTURES TAKE_PROFIT_MARKET (TP) if requested
+            # 9) Place FUTURES TAKE_PROFIT_MARKET (TP) if requested, using ROI% logic
             if tp_pct > 0:
                 if action == "BUY":
-                    tp_price = (filled_price * (Decimal("1") + tp_pct)).quantize(
+                    # For a long: price must rise by (tp_pct / leverage)
+                    price_factor = Decimal("1") + (tp_pct / leverage)
+                    tp_price = (filled_price * price_factor).quantize(
                         symbol_info['tick_size'], rounding=ROUND_DOWN
                     )
                     tp_order = self.client.futures_create_order(
@@ -574,7 +580,9 @@ class BinanceHelper:
                     )
                     logger.info(f"Placed FUTURES TP_MARKET at {tp_price} (ID={tp_order['orderId']})")
                 else:
-                    tp_price = (filled_price * (Decimal("1") - tp_pct)).quantize(
+                    # For a short: price must drop by (tp_pct / leverage)
+                    price_factor = Decimal("1") - (tp_pct / leverage)
+                    tp_price = (filled_price * price_factor).quantize(
                         symbol_info['tick_size'], rounding=ROUND_DOWN
                     )
                     tp_order = self.client.futures_create_order(
@@ -586,9 +594,11 @@ class BinanceHelper:
                     )
                     logger.info(f"Placed FUTURES TP_MARKET at {tp_price} (ID={tp_order['orderId']})")
 
-            # 10) Place FUTURES TRAILING_STOP_MARKET (TS) if requested
+            # 10) Place FUTURES TRAILING_STOP_MARKET (TS) if requested, using ROI% logic
             if trail_pct > 0:
-                raw_callback = (trail_pct * Decimal("100"))  # e.g. 2% → 2.0
+                # Convert ROI% to price‐percent by dividing by leverage
+                price_pct = trail_pct / leverage
+                raw_callback = price_pct * Decimal("100")      # e.g. (0.10 / 20)*100 = 0.5
                 callback_rate = raw_callback if raw_callback >= Decimal("0.1") else Decimal("0.1")
                 trail_order = self.client.futures_create_order(
                     symbol=ticker,
@@ -700,10 +710,10 @@ class BinanceHelper:
                 f"{filled_qty:.8f}",            # Inn = token received (e.g. BTC)
                 ticker.replace("USDT", ""),     # Inn‐Valuta = "BTC"
                 f"{entry_notional:.8f}",        # Ut = USDT spent
-                "USDT",                          # Ut‐Valuta
+                "USDT",                         # Ut‐Valuta
                 f"{commission:.8f}",
                 fee_asset,
-                ticker,                          # Marked = "BTCUSDT"
+                ticker,                         # Marked = "BTCUSDT"
                 f"Order {entry_id}"
             )
 
@@ -795,9 +805,14 @@ class BinanceHelper:
             #  FUTURES EXIT
             # ----------------
             # 1) Get current position to find entryPrice & qty
-            pos    = self.client.futures_position_information(symbol=ticker)[0]
-            qty    = abs(Decimal(pos["positionAmt"]))
-            entry_price = Decimal(pos["entryPrice"])  # e.g. 10000
+            pos         = self.client.futures_position_information(symbol=ticker)[0]
+            position_amt = Decimal(pos["positionAmt"])
+            qty          = abs(position_amt)
+            entry_price  = Decimal(pos["entryPrice"])
+
+            if qty == 0:
+                logger.info(f"No open futures position for {ticker}, nothing to exit.")
+                return
 
             # 2) Place MARKET exit
             exit_order = self.client.futures_create_order(
