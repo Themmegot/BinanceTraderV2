@@ -120,24 +120,62 @@ class BinanceHelper:
 
     def monitor_children_and_cancel(self, ticker, child_order_ids, poll_interval=5):
         """
-        Poll open orders every 'poll_interval' seconds. As soon as one of the 'child_order_ids'
-        is FILLED, cancel the remaining exit orders. If the position goes to zero, also cancel all.
+        Poll child exit orders and current position every `poll_interval` seconds.
+        - As soon as one child order (TP, SL, or TS) shows status 'FILLED', log its fill price
+          and commission, cancel all remaining siblings, and return.
+        - If the positionAmt drops to zero (e.g. due to a flip), check which child (if any)
+          is FILLED, log its details, cancel remaining siblings, and return.
         """
         while True:
             try:
-                # 1) If no open position, cancel all exit orders and return
+                # 1) Check position size
                 positions = self.client.futures_position_information(symbol=ticker)
-                if not positions or Decimal(positions[0]['positionAmt']) == Decimal('0'):
-                    logger.info(f"No open position for {ticker}. Cancelling exit orders.")
+                position_amt = Decimal('0')
+                if positions:
+                    position_amt = Decimal(positions[0].get('positionAmt', '0'))
+
+                # If position is flat (0), that means an exit happened—
+                # we need to identify which child filled (if any) and log it.
+                if position_amt == Decimal('0'):
+                    # Fetch each child exit order's status to see which one is FILLED.
+                    for oid in child_order_ids:
+                        try:
+                            order_info = self.client.futures_get_order(symbol=ticker, orderId=oid)
+                        except Exception:
+                            continue
+                        if order_info.get('status') == 'FILLED':
+                            # We found the filled exit leg. Log its fill price and commission:
+                            avg_price = order_info.get('avgPrice') or order_info.get('price')
+                            filled_qty = order_info.get('executedQty', '0')
+                            commission, asset = self.fetch_order_commission(ticker, oid)
+                            logger.info(
+                                f"Exit order {oid} FILLED at avgPrice={avg_price}, "
+                                f"quantity={filled_qty}, commission={commission} {asset}"
+                            )
+                            break
+
+                    # Now cancel any remaining sibling exit orders (if still open)
                     self.cancel_related_orders(ticker)
                     return
 
-                # 2) Look at open orders right now
-                open_orders = self.client.futures_get_open_orders(symbol=ticker)
-                for order in open_orders:
-                    oid = order['orderId']
-                    if oid in child_order_ids and order['status'] == 'FILLED':
-                        logger.info(f"Child order {oid} filled. Cancelling remaining exit orders.")
+                # 2) Position is still open—check each child to see if any is already FILLED
+                for oid in child_order_ids:
+                    try:
+                        order_info = self.client.futures_get_order(symbol=ticker, orderId=oid)
+                    except Exception:
+                        continue
+
+                    if order_info.get('status') == 'FILLED':
+                        # We found a child exit that just filled. Log details:
+                        avg_price = order_info.get('avgPrice') or order_info.get('price')
+                        filled_qty = order_info.get('executedQty', '0')
+                        commission, asset = self.fetch_order_commission(ticker, oid)
+                        logger.info(
+                            f"Exit order {oid} FILLED at avgPrice={avg_price}, "
+                            f"quantity={filled_qty}, commission={commission} {asset}"
+                        )
+
+                        # Cancel siblings and return
                         self.cancel_related_orders(ticker)
                         return
 
@@ -146,6 +184,7 @@ class BinanceHelper:
                 return
 
             time.sleep(poll_interval)
+
 
     def poll_order_status(
         self,
