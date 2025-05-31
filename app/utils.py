@@ -164,8 +164,9 @@ class BinanceHelper:
         Poll the LIMIT entry order (ID=order_id) every 15 seconds until one of:
           - status == FILLED   → log commission, return
           - status in [CANCELED, REJECTED, EXPIRED] → log and return
-          - timeout (elapsed >= max_wait) → cancel LIMIT, send fallback MARKET to avoid missing trade
+          - timeout (elapsed >= max_wait) → cancel LIMIT, send fallback MARKET to enter
         """
+
         elapsed = 0
         interval = 15
 
@@ -173,11 +174,13 @@ class BinanceHelper:
             try:
                 status = self.client.futures_get_order(symbol=ticker, orderId=order_id)['status']
                 if status == 'FILLED':
-                    time.sleep(5)  # give Binance a moment to finalize trades
+                    # Entry is filled: wait a moment, log commission, and return.
+                    time.sleep(5)
                     commission, asset = self.fetch_order_commission(ticker, order_id)
                     logger.info(f"Order {order_id} filled. Commission: {commission} {asset}")
                     return
                 elif status in ['CANCELED', 'REJECTED', 'EXPIRED']:
+                    # The LIMIT was canceled, rejected, or expired: log and exit.
                     logger.info(f"Order {order_id} status: {status}. Exiting poll.")
                     return
             except Exception as e:
@@ -187,20 +190,26 @@ class BinanceHelper:
             time.sleep(interval)
             elapsed += interval
 
-        # Timeout reached → send fallback MARKET
+        # If we reach this point, the LIMIT never filled within `max_wait` seconds.
+        # Cancel the original LIMIT and send a fallback MARKET entry (without reduceOnly).
         logger.warning(f"Order {order_id} not filled in time. Cancelling and sending fallback MARKET order.")
         try:
+            # Cancel the stale LIMIT
             self.client.futures_cancel_order(symbol=ticker, orderId=order_id)
+
+            # Place a MARKET order to enter the position.
+            # Note: remove reduceOnly=True so that this MARKET can actually open (or flip) a position.
             self.client.futures_create_order(
                 symbol=ticker,
                 side=action,
                 type=FUTURE_ORDER_TYPE_MARKET,
-                quantity=self.format_val(quantity, self.get_symbol_info(ticker)['quantity_precision']),
-                reduceOnly=True
+                quantity=self.format_val(quantity, self.get_symbol_info(ticker)['quantity_precision'])
+                # ← no reduceOnly=True here
             )
             logger.info(f"Fallback MARKET order for {ticker} placed.")
         except Exception as e:
             error_logger.error(f"Fallback MARKET order failed: {e}")
+
 
     def handle_enter_trade(self, payload):
         """
