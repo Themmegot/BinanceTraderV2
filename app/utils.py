@@ -263,6 +263,10 @@ class BinanceHelper:
         trailing_stop_percentage=None,
         max_wait=300
     ):
+        """
+        Poll the LIMIT entry order (ID=order_id) every 15s. If it never fills within
+        max_wait, cancel it and immediately place a fallback MARKET entry *and log it*.
+        """
         elapsed = 0
         interval = 15
 
@@ -270,13 +274,31 @@ class BinanceHelper:
             try:
                 status = self.client.futures_get_order(symbol=ticker, orderId=order_id)['status']
                 if status == 'FILLED':
+                    # Normal filled path: log commission & return
                     time.sleep(5)
                     commission, asset = self.fetch_order_commission(ticker, order_id)
                     logger.info(f"Order {order_id} filled. Commission: {commission} {asset}")
+                    # --- LOG THE ENTRY HERE FOR A NORMAL LIMIT FILL ---
+                    # For a LIMIT fill, we "sent" USDT (notional = adjusted_price * quantity)
+                    # and "received" BTC (quantity). Fee is `commission` in `asset`.
+                    notional = adjusted_price * Decimal(str(quantity))
+                    self.log_transaction(
+                        "ENTER",
+                        str(notional),                   # USDT spent
+                        "USDT",
+                        str(quantity),                   # BTC received
+                        ticker.replace("USDT", ""),      # e.g. "BTC"
+                        str(commission),
+                        asset,
+                        ticker,
+                        f"Order {order_id}"
+                    )
                     return
+
                 elif status in ['CANCELED', 'REJECTED', 'EXPIRED']:
                     logger.info(f"Order {order_id} status: {status}. Exiting poll.")
                     return
+
             except Exception as e:
                 error_logger.error(f"Polling error for order {order_id}: {e}")
                 return
@@ -284,18 +306,52 @@ class BinanceHelper:
             time.sleep(interval)
             elapsed += interval
 
+        # === TIMEOUT: Place fallback MARKET entry and immediately log it ===
         logger.warning(f"Order {order_id} not filled in time. Cancelling and sending fallback MARKET order.")
         try:
+            # 1) Cancel the stale LIMIT
             self.client.futures_cancel_order(symbol=ticker, orderId=order_id)
-            self.client.futures_create_order(
+
+            # 2) Place MARKET to open the position
+            fallback_order = self.client.futures_create_order(
                 symbol=ticker,
                 side=action,
                 type=FUTURE_ORDER_TYPE_MARKET,
                 quantity=self.format_val(quantity, self.get_symbol_info(ticker)['quantity_precision'])
+                # note: no reduceOnly here
             )
-            logger.info(f"Fallback MARKET order for {ticker} placed.")
+            fallback_id = fallback_order['orderId']
+            logger.info(f"Fallback MARKET order for {ticker} placed (ID={fallback_id}).")
+
+            # 3) Immediately log this fallback entry as if it “filled” at market price
+            #    We don’t know the exact fill price yet, so fetch the order details:
+            time.sleep(2)  # small delay to let Binance register the fill
+            filled_info = self.client.futures_get_order(symbol=ticker, orderId=fallback_id)
+            filled_price = Decimal(filled_info.get('avgPrice') or filled_info.get('price'))
+            filled_qty   = Decimal(filled_info.get('executedQty', '0'))
+
+            # Fetch commission on that MARKET fill
+            commission, fee_asset = self.fetch_order_commission(ticker, fallback_id)
+
+            # Calculate notional = fill_price × qty
+            notional = filled_price * filled_qty
+
+            # Now write to CSV: we “sent” USDT (notional) and “received” BTC (qty) on a BUY
+            self.log_transaction(
+                "ENTER",
+                f"{notional:.8f}",           # USDT spent
+                "USDT",
+                f"{filled_qty:.8f}",         # BTC received
+                ticker.replace("USDT", ""),  # e.g. "BTC"
+                f"{commission:.8f}",
+                fee_asset,
+                ticker,
+                f"Order {fallback_id} (fallback)"
+            )
+
         except Exception as e:
             error_logger.error(f"Fallback MARKET order failed: {e}")
+
 
     def handle_enter_trade(self, payload):
         """
