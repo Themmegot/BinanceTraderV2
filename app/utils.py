@@ -319,31 +319,35 @@ class BinanceHelper:
         action = payload['strategy']['order_action'].upper()
         order_price = Decimal(str(payload['bar']['order_price']))
 
+        # 1) Get the current position size
         position = self.client.futures_position_information(symbol=ticker)[0]
         amount = abs(Decimal(position['positionAmt']))
 
         symbol_info = self.get_symbol_info(ticker)
         adjusted_qty = self.adjust_to_step(amount, symbol_info['step_size'])
 
+        # 2) Minimum‐notional check
         notional = adjusted_qty * order_price
         if notional < Decimal(str(Config.MIN_NOTIONAL)):
             raise ValueError("Exit trade value too low")
 
+        # 3) Cancel any outstanding TP/SL/Trailing orders
         self.cancel_related_orders(ticker)
 
-        self.client.futures_create_order(
+        # 4) Send MARKET order to close the position
+        exit_order = self.client.futures_create_order(
             symbol=ticker,
             side=action,
             type=FUTURE_ORDER_TYPE_MARKET,
             quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
             reduceOnly=True
         )
-
         logger.info(f"Exit trade executed for {ticker} with qty {adjusted_qty}")
 
-        # Writing transaction out to transaction.cvs
-        commission, asset = self.fetch_order_commission(ticker, order['orderId'])
+        # 5) Fetch commission for this exit order
+        commission, asset = self.fetch_order_commission(ticker, exit_order['orderId'])
 
+        # 6) Log the transaction
         self.log_transaction(
             "EXIT",
             str(notional),
@@ -353,5 +357,5 @@ class BinanceHelper:
             str(commission),
             asset,
             ticker,
-            f"Order {order['orderId']}"
+            f"Order {exit_order['orderId']}"
         )
