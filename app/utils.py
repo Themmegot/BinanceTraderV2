@@ -780,7 +780,7 @@ def handle_enter_trade(self, payload):
     #  Exit trades
     # ---------------------------
 
-    def handle_exit_trade(self, payload):
+def handle_exit_trade(self, payload):
         """
         Unified “exit” handler. Detects futures vs spot similarly:
           - If payload contains “leverage”, do a futures exit (compute P&L, log profit/loss).
