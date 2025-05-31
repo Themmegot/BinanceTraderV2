@@ -333,19 +333,30 @@ class BinanceHelper:
             sl_id = resp_sl['orderId']
             logger.info(f"Placed SL_MARKET (ID={sl_id}) @ {sl_price_adj}")
 
-        # — Trailing-Stop (ROI → callbackRate) —
-        if trail_roi_pct > 0:
-            callback_rate_pct = float(trail_roi_pct / leverage)
-            resp_trail = self.client.futures_create_order(
-                symbol=ticker,
-                side=("SELL" if new_action == "BUY" else "BUY"),
-                type=FUTURE_ORDER_TYPE_TRAILING_STOP_MARKET,
-                callbackRate=callback_rate_pct,
-                quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
-                reduceOnly=True
+    # — Trailing-Stop (ROI → callbackRate, clamped) —
+    trail_id = None
+    if trail_roi_pct > 0:
+        raw_callback = float(trail_roi_pct / leverage)   # e.g. 0.0067
+        # Binance minimum callbackRate is 0.1%
+        callback_rate_pct = max(raw_callback, 0.1)
+
+        resp_trail = self.client.futures_create_order(
+            symbol=ticker,
+            side=("SELL" if new_action == "BUY" else "BUY"),
+            type=FUTURE_ORDER_TYPE_TRAILING_STOP_MARKET,
+            callbackRate=callback_rate_pct,
+            quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
+            reduceOnly=True
+        )
+        trail_id = resp_trail['orderId']
+        if raw_callback < 0.1:
+            logger.info(
+                f"Placed TRAILING_STOP_MARKET (ID={trail_id}) with clamped callbackRate={callback_rate_pct}% "
+                f"(raw {raw_callback:.6f} was below minimum)"
             )
-            trail_id = resp_trail['orderId']
+        else:
             logger.info(f"Placed TRAILING_STOP_MARKET (ID={trail_id}) callbackRate={callback_rate_pct}%")
+
 
         # === 8) Monitor child exit orders to cancel siblings ===
         child_ids = [oid for oid in (tp_id, sl_id, trail_id) if oid is not None]
