@@ -133,11 +133,22 @@ class BinanceHelper:
 
     def log_transaction(self, *args):
         """
-        Write one row to `logs/transactions.csv` in kryptosekken’s Generic CSV format:
-          Dato,Kvantitet mottatt,Valuta mottatt,Kvantitet sendt,Valuta sendt,
-          Gebyr beløp,Gebyr valuta,Transaksjonstype,Notat
+        Write one row to `logs/transactions.csv` in this exact format:
 
-        Args passed in (len=9):
+        Tidspunkt,Type,Inn,Inn‐Valuta,Ut,Ut‐Valuta,Gebyr,Gebyr‐Valuta,Marked,Notat
+
+          - 'Tidspunkt'  : UTC timestamp as "DD.MM.YYYY HH:MM:SS"
+          - 'Type'        : e.g. "Handel" / "Mining" or, in our bot, "enter"/"exit"/"profit"/"loss"
+          - 'Inn'         : amount received (string)
+          - 'Inn‐Valuta'  : currency received (string)
+          - 'Ut'          : amount sent (string)
+          - 'Ut‐Valuta'   : currency sent (string)
+          - 'Gebyr'       : fee amount (string)
+          - 'Gebyr‐Valuta': fee currency (string)
+          - 'Marked'      : market/pair or exchange (string, e.g. "BTCUSDT" or "coinbase")
+          - 'Notat'       : note (string)
+
+        We expect 10 arguments in this order:
             args[0] = tx_type        ("enter", "exit", "profit", or "loss")
             args[1] = qty_received   (string, e.g. "0.12345678")
             args[2] = asset_received (string, e.g. "BTC" or "USDT")
@@ -145,38 +156,28 @@ class BinanceHelper:
             args[4] = asset_sent     (string, e.g. "USDT" or "")
             args[5] = fee_amount     (string, e.g. "2.50000000")
             args[6] = fee_asset      (string, e.g. "USDT")
-            args[7] = market         (ignored in CSV, e.g. "BTCUSDT")
+            args[7] = market_pair    (string, e.g. "BTCUSDT" or "coinbase")
             args[8] = note           (string, e.g. "Order 12345")
-
-        Exactly these headers (in this order) will be written if file does not exist:
-            [
-              "Dato",
-              "Kvantitet mottatt",
-              "Valuta mottatt",
-              "Kvantitet sendt",
-              "Valuta sendt",
-              "Gebyr beløp",
-              "Gebyr valuta",
-              "Transaksjonstype",
-              "Notat"
-            ]
         """
         header = [
-            "Dato",
-            "Kvantitet mottatt",
-            "Valuta mottatt",
-            "Kvantitet sendt",
-            "Valuta sendt",
-            "Gebyr beløp",
-            "Gebyr valuta",
-            "Transaksjonstype",
+            "Tidspunkt",
+            "Type",
+            "Inn",
+            "Inn‐Valuta",
+            "Ut",
+            "Ut‐Valuta",
+            "Gebyr",
+            "Gebyr‐Valuta",
+            "Marked",
             "Notat"
         ]
 
+        # Ensure logs/ exists
         csv_dir = "logs"
         os.makedirs(csv_dir, exist_ok=True)
         csv_path = os.path.join(csv_dir, "transactions.csv")
 
+        # If file does not exist, write header row
         if not os.path.exists(csv_path):
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
@@ -190,7 +191,7 @@ class BinanceHelper:
             asset_sent,
             fee_amount,
             fee_asset,
-            market_pair,  # ignored
+            market_pair,
             note
         ) = args
 
@@ -198,16 +199,18 @@ class BinanceHelper:
         now_utc = datetime.utcnow()
         date_str = now_utc.strftime("%d.%m.%Y %H:%M:%S")
 
+        # Compose one row with exactly 10 columns:
         row = [
-            date_str,
-            qty_received,
-            asset_received,
-            qty_sent,
-            asset_sent,
-            fee_amount,
-            fee_asset,
-            tx_type,
-            note
+            date_str,         # Tidspunkt
+            tx_type,          # Type
+            qty_received,     # Inn
+            asset_received,   # Inn‐Valuta
+            qty_sent,         # Ut
+            asset_sent,       # Ut‐Valuta
+            fee_amount,       # Gebyr
+            fee_asset,        # Gebyr‐Valuta
+            market_pair,      # Marked
+            note              # Notat
         ]
 
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
@@ -589,7 +592,7 @@ class BinanceHelper:
         if is_futures:
             # CANCEL any previous TP/SL/TS before we sell at market
             self.cancel_related_orders(ticker)
-            
+
             # ----------------
             #  FUTURES EXIT
             # ----------------
