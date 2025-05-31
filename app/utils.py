@@ -1,7 +1,7 @@
 import logging
+import time
 import os
 import csv
-import time
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 
@@ -23,20 +23,16 @@ error_logger = logging.getLogger('error_logger')
 
 class BinanceHelper:
     def __init__(self):
-        # Initialize either testnet or live client
+        # Initialize the Binance futures client (testnet or live)
         if Config.USE_TESTNET:
             self.client = Client(Config.API_KEY, Config.API_SECRET, testnet=True)
             self.client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
         else:
             self.client = Client(Config.API_KEY, Config.API_SECRET, tld=Config.BINANCE_TLD)
 
-    # ---------------------------
-    #  Symbol‐info helpers
-    # ---------------------------
-
     def get_symbol_info(self, ticker):
         """
-        Get the futures symbol info (tickSize, stepSize, precision).
+        Fetch symbol filters (tickSize, stepSize, pricePrecision, quantityPrecision).
         """
         exchange_info = self.client.futures_exchange_info()
         symbol_info = next((s for s in exchange_info['symbols'] if s['symbol'] == ticker), None)
@@ -52,29 +48,9 @@ class BinanceHelper:
             "quantity_precision": int(symbol_info['quantityPrecision'])
         }
 
-    def get_symbol_info_spot(self, ticker):
-        """
-        Get the spot symbol info (tickSize, stepSize, precision).
-        """
-        info = self.client.get_symbol_info(ticker)
-        if not info:
-            raise ValueError(f"Symbol info for {ticker} not found")
-        price_filter = next(f for f in info["filters"] if f["filterType"] == "PRICE_FILTER")
-        lot_size_filter = next(f for f in info["filters"] if f["filterType"] == "LOT_SIZE")
-        return {
-            "tick_size": Decimal(price_filter["tickSize"]),
-            "step_size": Decimal(lot_size_filter["stepSize"]),
-            "price_precision": int(info["quotePrecision"]),
-            "quantity_precision": int(info["baseAssetPrecision"])
-        }
-
-    # ---------------------------
-    #  Rounding / formatting
-    # ---------------------------
-
     def adjust_to_step(self, value, step_size):
         """
-        Round 'value' down to the nearest 'step_size' increment.
+        Round 'value' down to the nearest multiple of 'step_size'.
         """
         value = Decimal(value)
         adjusted = (value // step_size) * step_size
@@ -83,17 +59,33 @@ class BinanceHelper:
 
     def format_val(self, value, precision):
         """
-        Format a Decimal or str to a string with exactly 'precision' decimal places.
+        Format a Decimal 'value' to a string with 'precision' decimal places.
         """
         return f"{Decimal(value):.{precision}f}"
 
-    # ---------------------------
-    #  Commission / fee helpers
-    # ---------------------------
+    def log_transaction(self, *args):
+        """
+        Append a transaction line to 'transactions.csv' inside a 'logs/' folder.
+        """
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+
+        csv_path = os.path.join(log_dir, "transactions.csv")
+        if not os.path.exists(csv_path):
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Tidspunkt", "Type", "Inn", "Inn-Valuta", "Ut", "Ut-Valuta",
+                    "Gebyr", "Gebyr-Valuta", "Marked", "Notat"
+                ])
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), *args])
 
     def fetch_order_commission(self, ticker, order_id):
         """
-        Given a futures order ID, return (total_commission, commission_asset).
+        Retrieve the total commission and commission asset for a given order ID.
         """
         try:
             trades = self.client.futures_account_trades(symbol=ticker, orderId=order_id)
@@ -109,121 +101,9 @@ class BinanceHelper:
             error_logger.error(f"Error fetching commission for order {order_id}: {e}")
             return Decimal("0"), ""
 
-    def fetch_spot_commission(self, ticker, order_id):
-        """
-        Given a spot order ID, return (total_commission, commission_asset).
-        """
-        try:
-            trades = self.client.get_my_trades(symbol=ticker, orderId=order_id)
-            total_commission = Decimal("0")
-            commission_asset = ""
-            for trade in trades:
-                commission = Decimal(trade.get("commission", "0"))
-                total_commission += commission
-                if not commission_asset:
-                    commission_asset = trade.get("commissionAsset", "")
-            return total_commission, commission_asset
-        except Exception as e:
-            error_logger.error(f"Error fetching spot commission for order {order_id}: {e}")
-            return Decimal("0"), ""
-
-    # ---------------------------
-    #  CSV logging for kryptosekken
-    # ---------------------------
-
-    def log_transaction(self, *args):
-        """
-        Write one row to `logs/transactions.csv` in this exact format:
-
-        Tidspunkt,Type,Inn,Inn‐Valuta,Ut,Ut‐Valuta,Gebyr,Gebyr‐Valuta,Marked,Notat
-
-          - 'Tidspunkt'  : UTC timestamp as "DD.MM.YYYY HH:MM:SS"
-          - 'Type'        : e.g. "Handel" / "Mining" or, in our bot, "enter"/"exit"/"profit"/"loss"
-          - 'Inn'         : amount received (string)
-          - 'Inn‐Valuta'  : currency received (string)
-          - 'Ut'          : amount sent (string)
-          - 'Ut‐Valuta'   : currency sent (string)
-          - 'Gebyr'       : fee amount (string)
-          - 'Gebyr‐Valuta': fee currency (string)
-          - 'Marked'      : market/pair or exchange (string, e.g. "BTCUSDT" or "coinbase")
-          - 'Notat'       : note (string)
-
-        We expect 10 arguments in this order:
-            args[0] = tx_type        ("enter", "exit", "profit", or "loss")
-            args[1] = qty_received   (string, e.g. "0.12345678")
-            args[2] = asset_received (string, e.g. "BTC" or "USDT")
-            args[3] = qty_sent       (string, e.g. "1000.00000000")
-            args[4] = asset_sent     (string, e.g. "USDT" or "")
-            args[5] = fee_amount     (string, e.g. "2.50000000")
-            args[6] = fee_asset      (string, e.g. "USDT")
-            args[7] = market_pair    (string, e.g. "BTCUSDT" or "coinbase")
-            args[8] = note           (string, e.g. "Order 12345")
-        """
-        header = [
-            "Tidspunkt",
-            "Type",
-            "Inn",
-            "Inn‐Valuta",
-            "Ut",
-            "Ut‐Valuta",
-            "Gebyr",
-            "Gebyr‐Valuta",
-            "Marked",
-            "Notat"
-        ]
-
-        # Ensure logs/ exists
-        csv_dir = "logs"
-        os.makedirs(csv_dir, exist_ok=True)
-        csv_path = os.path.join(csv_dir, "transactions.csv")
-
-        # If file does not exist, write header row
-        if not os.path.exists(csv_path):
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(header)
-
-        (
-            tx_type,
-            qty_received,
-            asset_received,
-            qty_sent,
-            asset_sent,
-            fee_amount,
-            fee_asset,
-            market_pair,
-            note
-        ) = args
-
-        # Format timestamp as "DD.MM.YYYY HH:MM:SS"
-        now_utc = datetime.utcnow()
-        date_str = now_utc.strftime("%d.%m.%Y %H:%M:%S")
-
-        # Compose one row with exactly 10 columns:
-        row = [
-            date_str,         # Tidspunkt
-            tx_type,          # Type
-            qty_received,     # Inn
-            asset_received,   # Inn‐Valuta
-            qty_sent,         # Ut
-            asset_sent,       # Ut‐Valuta
-            fee_amount,       # Gebyr
-            fee_asset,        # Gebyr‐Valuta
-            market_pair,      # Marked
-            note              # Notat
-        ]
-
-        with open(csv_path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(row)
-
-    # ---------------------------
-    #  Cancel open TP/SL/TS orders
-    # ---------------------------
-
     def cancel_related_orders(self, ticker):
         """
-        Cancel any open take-profit, stop-loss, or trailing-stop orders for this symbol.
+        Cancel any open TAKE_PROFIT_MARKET, STOP_MARKET, or TRAILING_STOP_MARKET orders for 'ticker'.
         """
         try:
             open_orders = self.client.futures_get_open_orders(symbol=ticker)
@@ -238,58 +118,26 @@ class BinanceHelper:
         except BinanceAPIException as e:
             error_logger.error(f"Error cancelling related orders: {str(e)}")
 
-    # ---------------------------
-    #  Polling child exit orders
-    # ---------------------------
-
     def monitor_children_and_cancel(self, ticker, child_order_ids, poll_interval=5):
         """
-        Poll child exit orders (TP / SL / TS) and current position size. As soon as
-        one child shows status 'FILLED', log its fill price + commission, cancel siblings,
-        then return. If position hits zero unexpectedly (flip), identify which child filled,
-        log it, cancel siblings, and return.
+        Poll open orders every 'poll_interval' seconds. As soon as one of the 'child_order_ids'
+        is FILLED, cancel the remaining exit orders. If the position goes to zero, also cancel all.
         """
         while True:
             try:
+                # 1) If no open position, cancel all exit orders and return
                 positions = self.client.futures_position_information(symbol=ticker)
-                position_amt = Decimal('0')
-                if positions:
-                    position_amt = Decimal(positions[0].get('positionAmt', '0'))
-
-                if position_amt == Decimal('0'):
-                    # Position is flat: figure out which child (if any) filled.
-                    for oid in child_order_ids:
-                        try:
-                            order_info = self.client.futures_get_order(symbol=ticker, orderId=oid)
-                        except Exception:
-                            continue
-                        if order_info.get('status') == 'FILLED':
-                            avg_price = order_info.get('avgPrice') or order_info.get('price')
-                            filled_qty = order_info.get('executedQty', '0')
-                            commission, asset = self.fetch_order_commission(ticker, oid)
-                            logger.info(
-                                f"Exit order {oid} FILLED at avgPrice={avg_price}, "
-                                f"quantity={filled_qty}, commission={commission} {asset}"
-                            )
-                            break
-
+                if not positions or Decimal(positions[0]['positionAmt']) == Decimal('0'):
+                    logger.info(f"No open position for {ticker}. Cancelling exit orders.")
                     self.cancel_related_orders(ticker)
                     return
 
-                # If position still open, check each child for FILLED
-                for oid in child_order_ids:
-                    try:
-                        order_info = self.client.futures_get_order(symbol=ticker, orderId=oid)
-                    except Exception:
-                        continue
-                    if order_info.get('status') == 'FILLED':
-                        avg_price = order_info.get('avgPrice') or order_info.get('price')
-                        filled_qty = order_info.get('executedQty', '0')
-                        commission, asset = self.fetch_order_commission(ticker, oid)
-                        logger.info(
-                            f"Exit order {oid} FILLED at avgPrice={avg_price}, "
-                            f"quantity={filled_qty}, commission={commission} {asset}"
-                        )
+                # 2) Look at open orders right now
+                open_orders = self.client.futures_get_open_orders(symbol=ticker)
+                for order in open_orders:
+                    oid = order['orderId']
+                    if oid in child_order_ids and order['status'] == 'FILLED':
+                        logger.info(f"Child order {oid} filled. Cancelling remaining exit orders.")
                         self.cancel_related_orders(ticker)
                         return
 
@@ -298,10 +146,6 @@ class BinanceHelper:
                 return
 
             time.sleep(poll_interval)
-
-    # ---------------------------
-    #  Poll a LIMIT until filled (or timeout)
-    # ---------------------------
 
     def poll_order_status(
         self,
@@ -317,9 +161,12 @@ class BinanceHelper:
         max_wait=300
     ):
         """
-        Poll a futures LIMIT entry order for up to max_wait seconds. If it never fills,
-        cancel it and immediately place a fallback MARKET and log that entry.
+        Poll the LIMIT entry order (ID=order_id) every 15 seconds until one of:
+          - status == FILLED   → log commission, return
+          - status in [CANCELED, REJECTED, EXPIRED] → log and return
+          - timeout (elapsed >= max_wait) → cancel LIMIT, send fallback MARKET to enter
         """
+
         elapsed = 0
         interval = 15
 
@@ -327,35 +174,15 @@ class BinanceHelper:
             try:
                 status = self.client.futures_get_order(symbol=ticker, orderId=order_id)['status']
                 if status == 'FILLED':
-                    # Normal LIMIT fill path → log as a futures entry
+                    # Entry is filled: wait a moment, log commission, and return.
                     time.sleep(5)
                     commission, asset = self.fetch_order_commission(ticker, order_id)
                     logger.info(f"Order {order_id} filled. Commission: {commission} {asset}")
-
-                    # Compute notional = filled_price × quantity
-                    order_info = self.client.futures_get_order(symbol=ticker, orderId=order_id)
-                    fill_price = Decimal(order_info.get('avgPrice') or order_info.get('price'))
-                    filled_qty = Decimal(order_info.get('executedQty', '0'))
-                    notional = fill_price * filled_qty
-
-                    # Log this futures entry as full notional (so you can keep track of position size).
-                    self.log_transaction(
-                        "enter",
-                        f"{filled_qty:.8f}",          # Kvantitet mottatt (BTC)
-                        ticker.replace("USDT", ""),  # "BTC"
-                        f"{notional:.8f}",           # Kvantitet sendt (USDT)
-                        "USDT",
-                        f"{commission:.8f}",
-                        asset,
-                        ticker,
-                        f"Order {order_id}"
-                    )
                     return
-
                 elif status in ['CANCELED', 'REJECTED', 'EXPIRED']:
+                    # The LIMIT was canceled, rejected, or expired: log and exit.
                     logger.info(f"Order {order_id} status: {status}. Exiting poll.")
                     return
-
             except Exception as e:
                 error_logger.error(f"Polling error for order {order_id}: {e}")
                 return
@@ -363,553 +190,257 @@ class BinanceHelper:
             time.sleep(interval)
             elapsed += interval
 
-        # TIMEOUT → fallback MARKET
+        # If we reach this point, the LIMIT never filled within `max_wait` seconds.
+        # Cancel the original LIMIT and send a fallback MARKET entry (without reduceOnly).
         logger.warning(f"Order {order_id} not filled in time. Cancelling and sending fallback MARKET order.")
         try:
-            # 1) Cancel the stale LIMIT
+            # Cancel the stale LIMIT
             self.client.futures_cancel_order(symbol=ticker, orderId=order_id)
 
-            # 2) Place MARKET to open the position
-            fallback_order = self.client.futures_create_order(
+            # Place a MARKET order to enter the position.
+            # Note: remove reduceOnly=True so that this MARKET can actually open (or flip) a position.
+            self.client.futures_create_order(
                 symbol=ticker,
                 side=action,
                 type=FUTURE_ORDER_TYPE_MARKET,
                 quantity=self.format_val(quantity, self.get_symbol_info(ticker)['quantity_precision'])
+                # ← no reduceOnly=True here
             )
-            fallback_id = fallback_order['orderId']
-            logger.info(f"Fallback MARKET order for {ticker} placed (ID={fallback_id}).")
-
-            # 3) Wait a moment, fetch fill details
-            time.sleep(2)
-            filled_info = self.client.futures_get_order(symbol=ticker, orderId=fallback_id)
-            filled_price = Decimal(filled_info.get('avgPrice') or filled_info.get('price'))
-            filled_qty   = Decimal(filled_info.get('executedQty', '0'))
-            commission, fee_asset = self.fetch_order_commission(ticker, fallback_id)
-
-            # Compute notional owned: filled_price × filled_qty
-            notional = filled_price * filled_qty
-
-            # 4) Log fallback futures entry
-            self.log_transaction(
-                "enter",
-                f"{filled_qty:.8f}",           # Kvantitet mottatt (BTC)
-                ticker.replace("USDT", ""),   # "BTC"
-                f"{notional:.8f}",            # Kvantitet sendt (USDT)
-                "USDT",
-                f"{commission:.8f}",
-                fee_asset,
-                ticker,
-                f"Order {fallback_id} (fallback)"
-            )
-
+            logger.info(f"Fallback MARKET order for {ticker} placed.")
         except Exception as e:
             error_logger.error(f"Fallback MARKET order failed: {e}")
 
-    # ---------------------------
-    #  Place trades
-    # ---------------------------
+
     def handle_enter_trade(self, payload):
         """
-        Unified “enter” handler. Automatically places SL/TP/TS children after ANY fill,
-        whether via LIMIT or via fallback MARKET. Detects futures vs. spot by the presence
-        of "leverage" in the payload.
+        Places a LIMIT entry based on payload, waits for it to fill, then places
+        ROI-based TP/SL/Trailing‐Stop orders and monitors them. If an opposite-side
+        position already exists, flatten it first. Prevents pyramiding by skipping
+        same-direction signals when already in that direction.
         """
-        is_futures = ("leverage" in payload and payload["leverage"] is not None)
-        ticker     = payload["ticker"]
-        action     = payload["strategy"]["order_action"].upper()  # "BUY" or "SELL"
+        ticker      = payload['ticker']
+        new_action  = payload['strategy']['order_action'].upper()   # "BUY" or "SELL"
+        order_price = Decimal(str(payload['bar']['order_price']))
+        leverage    = Decimal(str(payload['leverage']))
+        percent_eq  = Decimal(str(payload['percent_of_equity'])) / Decimal('100')
 
-        if is_futures:
-            # ----------------
-            #  FUTURES ENTRY
-            # ----------------
-            order_price       = Decimal(str(payload["bar"]["order_price"]))
-            leverage          = Decimal(str(payload["leverage"]))
-            percent_equity    = Decimal(str(payload["percent_of_equity"])) / Decimal("100")
-            tp_pct            = Decimal(str(payload.get("take_profit_percent", 0))) / Decimal("100")
-            sl_pct            = Decimal(str(payload.get("stop_loss_percent", 0))) / Decimal("100")
-            trail_pct         = Decimal(str(payload.get("trailing_stop_percentage", 0))) / Decimal("100")
+        # === Read ROI-based exit params from payload ===
+        tp_roi_pct    = Decimal(str(payload.get('take_profit_percent', 0)))
+        sl_roi_pct    = Decimal(str(payload.get('stop_loss_percent', 0)))
+        trail_roi_pct = Decimal(str(payload.get('trailing_stop_percentage', 0)))
 
-            # 1) Set leverage
-            self.client.futures_change_leverage(symbol=ticker, leverage=int(leverage))
+        # === 1) Safely check current position ===
+        positions = self.client.futures_position_information(symbol=ticker)
+        if not positions:
+            current_amt = Decimal('0')
+        else:
+            pos_entry = positions[0]
+            current_amt = Decimal(pos_entry.get('positionAmt', '0'))
 
-            # 2) Calculate quantity based on margin balance
-            margin      = Decimal(self.client.futures_account()['availableBalance'])
-            raw_qty     = (margin * leverage * percent_equity) / order_price
-            symbol_info = self.get_symbol_info(ticker)
-            qty         = self.adjust_to_step(raw_qty, symbol_info['step_size'])
+        # === 2) Prevent pyramiding: if already in same direction, skip ===
+        if current_amt > 0 and new_action == "BUY":
+            logger.info(f"Already long {current_amt}; skipping additional BUY signal.")
+            return
+        if current_amt < 0 and new_action == "SELL":
+            logger.info(f"Already short {current_amt}; skipping additional SELL signal.")
+            return
 
-            # 3) Check MIN_NOTIONAL
-            notional = qty * order_price
-            if notional < Decimal(str(Config.MIN_NOTIONAL)):
-                raise ValueError("Trade value too low")
+        # === 3) If opposite position exists, exit it first ===
+        if current_amt > 0 and new_action == "SELL":
+            # We’re long but need to go short → flatten the long
+            self.handle_exit_trade({
+                'ticker': ticker,
+                'strategy': {'order_action': 'SELL'},
+                'bar': {'order_price': order_price}
+            })
+            # Wait until Binance reports positionAmt == 0
+            while True:
+                positions = self.client.futures_position_information(symbol=ticker)
+                if not positions or Decimal(positions[0].get('positionAmt', '0')) == 0:
+                    break
+                time.sleep(1)
 
-            # 4) Place the LIMIT entry
-            limit_order = self.client.futures_create_order(
+        elif current_amt < 0 and new_action == "BUY":
+            # We’re short but need to go long → flatten the short
+            self.handle_exit_trade({
+                'ticker': ticker,
+                'strategy': {'order_action': 'BUY'},
+                'bar': {'order_price': order_price}
+            })
+            while True:
+                positions = self.client.futures_position_information(symbol=ticker)
+                if not positions or Decimal(positions[0].get('positionAmt', '0')) == 0:
+                    break
+                time.sleep(1)
+
+        # === 4) Now no opposite position remains; proceed to open new ===
+        symbol_info    = self.get_symbol_info(ticker)
+        adjusted_price = self.adjust_to_step(order_price, symbol_info['tick_size'])
+        self.client.futures_change_leverage(symbol=ticker, leverage=int(leverage))
+
+        margin = Decimal(self.client.futures_account().get('availableBalance', '0'))
+        qty    = (margin * leverage * percent_eq) / adjusted_price
+        adjusted_qty = self.adjust_to_step(qty, symbol_info['step_size'])
+
+        notional = adjusted_qty * adjusted_price
+        if notional < Decimal(str(Config.MIN_NOTIONAL)):
+            raise ValueError("Trade value too low")
+
+        # === 5) Place the new LIMIT entry order ===
+        entry_order = self.client.futures_create_order(
+            symbol=ticker,
+            side=new_action,
+            type=FUTURE_ORDER_TYPE_LIMIT,
+            quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
+            price=self.format_val(adjusted_price, symbol_info['price_precision']),
+            timeInForce='GTC'
+        )
+        entry_id = entry_order['orderId']
+        logger.info(f"Entering {new_action} LIMIT for {ticker}: ID={entry_id}, price={adjusted_price}, qty={adjusted_qty}")
+
+        # === 6) Wait for LIMIT to fill (or fallback to MARKET) ===
+        self.poll_order_status(ticker, entry_id, new_action, adjusted_qty, adjusted_price, leverage)
+
+        # === 7) Entry is now filled at 'adjusted_price' ===
+        entry_price = adjusted_price
+
+        # === 8) Place ROI-based TP / SL / Trailing-Stop orders ===
+        tp_id, sl_id, trail_id = None, None, None
+
+        # — Take-Profit (ROI → price) —
+        if tp_roi_pct > 0:
+            if new_action == "BUY":
+                factor_tp = Decimal('1') + (tp_roi_pct / Decimal('100') / leverage)
+            else:  # "SELL"
+                factor_tp = Decimal('1') - (tp_roi_pct / Decimal('100') / leverage)
+            take_profit_price = entry_price * factor_tp
+            tp_price_adj = self.adjust_to_step(take_profit_price, symbol_info['tick_size'])
+
+            resp_tp = self.client.futures_create_order(
                 symbol=ticker,
-                side=action,
-                type=FUTURE_ORDER_TYPE_LIMIT,
-                quantity=self.format_val(qty, symbol_info['quantity_precision']),
-                price=self.format_val(order_price, symbol_info['price_precision']),
+                side=("SELL" if new_action == "BUY" else "BUY"),
+                type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                stopPrice=self.format_val(tp_price_adj, symbol_info['price_precision']),
+                closePosition=False,
+                quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
+                reduceOnly=True,
                 timeInForce='GTC'
             )
-            entry_id = limit_order['orderId']
-            logger.info(f"Entering {action} LIMIT for {ticker}: ID={entry_id}, price={order_price}, qty={qty}")
+            tp_id = resp_tp['orderId']
+            logger.info(f"Placed TP_MARKET (ID={tp_id}) @ {tp_price_adj}")
 
-            # 5) Poll until LIMIT is FILLED, or fallback to MARKET
-            filled_price = None
-            filled_qty   = None
-            commission   = Decimal("0")
-            fee_asset    = ""
+        # — Stop-Loss (ROI → price) —
+        if sl_roi_pct > 0:
+            if new_action == "BUY":
+                factor_sl = Decimal('1') - (sl_roi_pct / Decimal('100') / leverage)
+            else:  # "SELL"
+                factor_sl = Decimal('1') + (sl_roi_pct / Decimal('100') / leverage)
+            stop_loss_price = entry_price * factor_sl
+            sl_price_adj = self.adjust_to_step(stop_loss_price, symbol_info['tick_size'])
 
-            elapsed = 0
-            interval = 15
-            max_wait = 300
-
-            while elapsed < max_wait:
-                try:
-                    info = self.client.futures_get_order(symbol=ticker, orderId=entry_id)
-                    status = info.get('status')
-                    if status == 'FILLED':
-                        time.sleep(2)  # allow commission data to post
-                        filled_price = Decimal(info.get('avgPrice') or info.get('price'))
-                        filled_qty   = Decimal(info.get('executedQty', '0'))
-                        commission, fee_asset = self.fetch_order_commission(ticker, entry_id)
-                        logger.info(f"Futures ORDER {entry_id} FILLED at {filled_price}, qty={filled_qty}, fee={commission} {fee_asset}")
-                        break
-
-                    elif status in ['CANCELED', 'REJECTED', 'EXPIRED']:
-                        logger.info(f"Futures ORDER {entry_id} status: {status}. Not placing SL/TP for LIMIT.")
-                        return
-
-                except Exception as e:
-                    error_logger.error(f"Error polling futures order {entry_id}: {e}")
-                    return
-
-                time.sleep(interval)
-                elapsed += interval
-            else:
-                # LIMIT never filled → fallback MARKET
-                logger.warning(f"Futures ORDER {entry_id} not filled in time. Cancelling LIMIT and sending MARKET.")
-                try:
-                    self.client.futures_cancel_order(symbol=ticker, orderId=entry_id)
-                except Exception as e:
-                    logger.error(f"Failed to cancel futures ORDER {entry_id}: {e}")
-
-                mkt_order = self.client.futures_create_order(
-                    symbol=ticker,
-                    side=action,
-                    type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=self.format_val(qty, symbol_info['quantity_precision'])
-                )
-                fallback_id = mkt_order['orderId']
-                logger.info(f"Futures fallback MARKET for {ticker} placed: ID={fallback_id}")
-
-                time.sleep(2)
-                info = self.client.futures_get_order(symbol=ticker, orderId=fallback_id)
-                filled_price = Decimal(info.get('avgPrice') or info.get('price'))
-                filled_qty   = Decimal(info.get('executedQty', '0'))
-                commission, fee_asset = self.fetch_order_commission(ticker, fallback_id)
-                logger.info(f"Futures fallback {fallback_id} FILLED at {filled_price}, qty={filled_qty}, fee={commission} {fee_asset}")
-
-                entry_id = fallback_id
-
-            # At this point, we have filled_price, filled_qty, commission, fee_asset.
-
-            # 6) Log the futures entry (full notional) into CSV
-            entry_notional = filled_price * filled_qty
-            self.log_transaction(
-                "enter",
-                f"{filled_qty:.8f}",            # Inn = BTC received
-                ticker.replace("USDT", ""),     # Inn‐Valuta = "BTC"
-                f"{entry_notional:.8f}",        # Ut = USDT spent
-                "USDT",                         # Ut‐Valuta
-                f"{commission:.8f}",
-                fee_asset,
-                ticker,                         # Marked = "BTCUSDT"
-                f"Order {entry_id}"
-            )
-
-            # 7) Cancel any lingering TP/SL/TS from a previous position
-            self.cancel_related_orders(ticker)
-
-            # 8) Place FUTURES STOP_MARKET (SL) if requested, using ROI% logic
-            if sl_pct > 0:
-                if action == "BUY":
-                    # For a long: price must drop by (sl_pct / leverage)
-                    price_factor = Decimal("1") - (sl_pct / leverage)
-                    sl_price = (filled_price * price_factor).quantize(
-                        symbol_info['tick_size'], rounding=ROUND_DOWN
-                    )
-                    stop_order = self.client.futures_create_order(
-                        symbol=ticker,
-                        side="SELL",
-                        type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                        stopPrice=self.format_val(sl_price, symbol_info['price_precision']),
-                        closePosition=True
-                    )
-                    logger.info(f"Placed FUTURES SL_MARKET at {sl_price} (ID={stop_order['orderId']})")
-                else:
-                    # For a short: price must rise by (sl_pct / leverage)
-                    price_factor = Decimal("1") + (sl_pct / leverage)
-                    sl_price = (filled_price * price_factor).quantize(
-                        symbol_info['tick_size'], rounding=ROUND_DOWN
-                    )
-                    stop_order = self.client.futures_create_order(
-                        symbol=ticker,
-                        side="BUY",
-                        type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                        stopPrice=self.format_val(sl_price, symbol_info['price_precision']),
-                        closePosition=True
-                    )
-                    logger.info(f"Placed FUTURES SL_MARKET at {sl_price} (ID={stop_order['orderId']})")
-
-            # 9) Place FUTURES TAKE_PROFIT_MARKET (TP) if requested, using ROI% logic
-            if tp_pct > 0:
-                if action == "BUY":
-                    # For a long: price must rise by (tp_pct / leverage)
-                    price_factor = Decimal("1") + (tp_pct / leverage)
-                    tp_price = (filled_price * price_factor).quantize(
-                        symbol_info['tick_size'], rounding=ROUND_DOWN
-                    )
-                    tp_order = self.client.futures_create_order(
-                        symbol=ticker,
-                        side="SELL",
-                        type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
-                        stopPrice=self.format_val(tp_price, symbol_info['price_precision']),
-                        closePosition=True
-                    )
-                    logger.info(f"Placed FUTURES TP_MARKET at {tp_price} (ID={tp_order['orderId']})")
-                else:
-                    # For a short: price must drop by (tp_pct / leverage)
-                    price_factor = Decimal("1") - (tp_pct / leverage)
-                    tp_price = (filled_price * price_factor).quantize(
-                        symbol_info['tick_size'], rounding=ROUND_DOWN
-                    )
-                    tp_order = self.client.futures_create_order(
-                        symbol=ticker,
-                        side="BUY",
-                        type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
-                        stopPrice=self.format_val(tp_price, symbol_info['price_precision']),
-                        closePosition=True
-                    )
-                    logger.info(f"Placed FUTURES TP_MARKET at {tp_price} (ID={tp_order['orderId']})")
-
-            # 10) Place FUTURES TRAILING_STOP_MARKET (TS) if requested, using ROI% logic
-            if trail_pct > 0:
-                # Convert ROI% to price‐percent by dividing by leverage
-                price_pct = trail_pct / leverage
-                raw_callback = price_pct * Decimal("100")      # e.g. (0.10 / 20)*100 = 0.5
-                callback_rate = raw_callback if raw_callback >= Decimal("0.1") else Decimal("0.1")
-                trail_order = self.client.futures_create_order(
-                    symbol=ticker,
-                    side="SELL" if action == "BUY" else "BUY",
-                    type=FUTURE_ORDER_TYPE_TRAILING_STOP_MARKET,
-                    callbackRate=float(callback_rate),
-                    quantity=self.format_val(filled_qty, symbol_info['quantity_precision']),
-                    closePosition=True
-                )
-                logger.info(f"Placed FUTURES TRAILING_STOP_MARKET with callbackRate={callback_rate}% (ID={trail_order['orderId']})")
-
-        else:
-            # ----------------
-            #   SPOT ENTRY
-            # ----------------
-            order_price    = Decimal(str(payload["bar"]["order_price"]))
-            percent_equity = Decimal(str(payload["percent_of_equity"])) / Decimal("100")
-            tp_pct         = Decimal(str(payload.get("take_profit_percent", 0))) / Decimal("100")
-            sl_pct         = Decimal(str(payload.get("stop_loss_percent", 0))) / Decimal("100")
-            trail_pct      = Decimal(str(payload.get("trailing_stop_percentage", 0))) / Decimal("100")
-
-            # 1) Get symbol info, balance, calculate qty
-            symbol_info = self.get_symbol_info_spot(ticker)
-            balance     = Decimal(self.client.get_asset_balance(asset="USDT")["free"])
-            raw_qty     = (balance * percent_equity) / order_price
-            qty         = self.adjust_to_step(raw_qty, symbol_info["step_size"])
-
-            # 2) Check MIN_NOTIONAL
-            notional = qty * order_price
-            if notional < Decimal(str(Config.MIN_NOTIONAL)):
-                raise ValueError("Trade value too low")
-
-            # 3) Place a spot LIMIT
-            spot_order = self.client.create_order(
+            resp_sl = self.client.futures_create_order(
                 symbol=ticker,
-                side=action,
-                type="LIMIT",
-                timeInForce="GTC",
-                quantity=self.format_val(qty, symbol_info["quantity_precision"]),
-                price=self.format_val(order_price, symbol_info["price_precision"])
+                side=("SELL" if new_action == "BUY" else "BUY"),
+                type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                stopPrice=self.format_val(sl_price_adj, symbol_info['price_precision']),
+                closePosition=False,
+                quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
+                reduceOnly=True,
+                timeInForce='GTC'
             )
-            entry_id = spot_order["orderId"]
-            logger.info(f"Entering {action} LIMIT (spot) for {ticker}: ID={entry_id}, price={order_price}, qty={qty}")
+            sl_id = resp_sl['orderId']
+            logger.info(f"Placed SL_MARKET (ID={sl_id}) @ {sl_price_adj}")
 
-            # 4) Poll until LIMIT is FILLED, or fallback to MARKET
-            filled_price = None
-            filled_qty   = None
-            commission   = Decimal("0")
-            fee_asset    = ""
+        # — Trailing-Stop (ROI → callbackRate, clamped to ≥0.1%) —
+        if trail_roi_pct > 0:
+            raw_callback = float(trail_roi_pct / leverage)     # e.g. 2% ROI at 20× → 0.1%
+            callback_rate_pct = max(raw_callback, 0.1)
 
-            elapsed = 0
-            interval = 5
-            max_wait = 60
-
-            while elapsed < max_wait:
-                try:
-                    info = self.client.get_order(symbol=ticker, orderId=entry_id)
-                    status = info["status"]
-                    if status == "FILLED":
-                        filled_qty   = Decimal(info["executedQty"])
-                        avg_price    = (Decimal(info["cummulativeQuoteQty"]) / filled_qty) if filled_qty != 0 else order_price
-                        filled_price = avg_price
-                        commission, fee_asset = self.fetch_spot_commission(ticker, entry_id)
-                        logger.info(f"Spot ORDER {entry_id} FILLED at {filled_price}, qty={filled_qty}, fee={commission} {fee_asset}")
-                        break
-
-                    elif status in ["CANCELED", "REJECTED", "EXPIRED"]:
-                        logger.info(f"Spot ORDER {entry_id} status: {status}. Not placing SL/TP.")
-                        return
-
-                except Exception as e:
-                    error_logger.error(f"Error polling spot order {entry_id}: {e}")
-                    return
-
-                time.sleep(interval)
-                elapsed += interval
-
-            else:
-                # LIMIT never filled → fallback MARKET
-                logger.warning(f"Spot ORDER {entry_id} not filled in time. Cancelling LIMIT and sending MARKET.")
-                try:
-                    self.client.cancel_order(symbol=ticker, orderId=entry_id)
-                except Exception as e:
-                    logger.error(f"Failed to cancel spot ORDER {entry_id}: {e}")
-
-                mkt_order = self.client.create_order(
-                    symbol=ticker,
-                    side=action,
-                    type="MARKET",
-                    quantity=self.format_val(qty, symbol_info["quantity_precision"])
-                )
-                fallback_id = mkt_order["orderId"]
-                logger.info(f"Spot fallback MARKET for {ticker} placed: ID={fallback_id}")
-
-                time.sleep(2)
-                info = self.client.get_order(symbol=ticker, orderId=fallback_id)
-                filled_qty   = Decimal(info["executedQty"])
-                avg_price    = (Decimal(info["cummulativeQuoteQty"]) / filled_qty) if filled_qty != 0 else order_price
-                filled_price = avg_price
-                commission, fee_asset = self.fetch_spot_commission(ticker, fallback_id)
-                logger.info(f"Spot fallback {fallback_id} FILLED at {filled_price}, qty={filled_qty}, fee={commission} {fee_asset}")
-
-                entry_id = fallback_id
-
-            # 5) Log the spot entry (full notional) into CSV
-            entry_notional = filled_price * filled_qty
-            self.log_transaction(
-                "enter",
-                f"{filled_qty:.8f}",            # Inn = token received (e.g. BTC)
-                ticker.replace("USDT", ""),     # Inn‐Valuta = "BTC"
-                f"{entry_notional:.8f}",        # Ut = USDT spent
-                "USDT",                         # Ut‐Valuta
-                f"{commission:.8f}",
-                fee_asset,
-                ticker,                         # Marked = "BTCUSDT"
-                f"Order {entry_id}"
-            )
-
-            # 6) Cancel any lingering TP/SL/TS from a previous position (futures child orders)
-            self.cancel_related_orders(ticker)
-
-            # 7) Place SPOT STOP_LOSS_LIMIT (SL) if requested
-            if sl_pct > 0:
-                if action == "BUY":
-                    sl_price = (filled_price * (Decimal("1") - sl_pct)).quantize(
-                        symbol_info["tick_size"], rounding=ROUND_DOWN
-                    )
-                    stop_order = self.client.create_order(
-                        symbol=ticker,
-                        side="SELL",
-                        type="STOP_LOSS_LIMIT",
-                        timeInForce="GTC",
-                        quantity=self.format_val(filled_qty, symbol_info["quantity_precision"]),
-                        price=self.format_val(sl_price, symbol_info["price_precision"]),
-                        stopPrice=self.format_val(sl_price, symbol_info["price_precision"])
-                    )
-                    logger.info(f"Placed SPOT STOP_LOSS_LIMIT at {sl_price} (ID={stop_order['orderId']})")
-                else:
-                    sl_price = (filled_price * (Decimal("1") + sl_pct)).quantize(
-                        symbol_info["tick_size"], rounding=ROUND_DOWN
-                    )
-                    stop_order = self.client.create_order(
-                        symbol=ticker,
-                        side="BUY",
-                        type="STOP_LOSS_LIMIT",
-                        timeInForce="GTC",
-                        quantity=self.format_val(filled_qty, symbol_info["quantity_precision"]),
-                        price=self.format_val(sl_price, symbol_info["price_precision"]),
-                        stopPrice=self.format_val(sl_price, symbol_info["price_precision"])
-                    )
-                    logger.info(f"Placed SPOT STOP_LOSS_LIMIT at {sl_price} (ID={stop_order['orderId']})")
-
-            # 8) Place SPOT TAKE_PROFIT_LIMIT (TP) if requested
-            if tp_pct > 0:
-                if action == "BUY":
-                    tp_price = (filled_price * (Decimal("1") + tp_pct)).quantize(
-                        symbol_info["tick_size"], rounding=ROUND_DOWN
-                    )
-                    tp_order = self.client.create_order(
-                        symbol=ticker,
-                        side="SELL",
-                        type="TAKE_PROFIT_LIMIT",
-                        timeInForce="GTC",
-                        quantity=self.format_val(filled_qty, symbol_info["quantity_precision"]),
-                        price=self.format_val(tp_price, symbol_info["price_precision"]),
-                        stopPrice=self.format_val(tp_price, symbol_info["price_precision"])
-                    )
-                    logger.info(f"Placed SPOT TAKE_PROFIT_LIMIT at {tp_price} (ID={tp_order['orderId']})")
-                else:
-                    tp_price = (filled_price * (Decimal("1") - tp_pct)).quantize(
-                        symbol_info["tick_size"], rounding=ROUND_DOWN
-                    )
-                    tp_order = self.client.create_order(
-                        symbol=ticker,
-                        side="BUY",
-                        type="TAKE_PROFIT_LIMIT",
-                        timeInForce="GTC",
-                        quantity=self.format_val(filled_qty, symbol_info["quantity_precision"]),
-                        price=self.format_val(tp_price, symbol_info["price_precision"]),
-                        stopPrice=self.format_val(tp_price, symbol_info["price_precision"])
-                    )
-                    logger.info(f"Placed SPOT TAKE_PROFIT_LIMIT at {tp_price} (ID={tp_order['orderId']})")
-
-            # 9) (Spot trailing stop is not natively supported; skip or implement separately)
-
-    # ---------------------------
-    #  Exit trades
-    # ---------------------------
-    def handle_exit_trade(self, payload):
-        """
-        Unified “exit” handler. Detects futures vs spot similarly:
-          - If payload contains “leverage”, do a futures exit (compute P&L, log profit/loss).
-          - Otherwise, do a spot exit (log full notional).
-        """
-        is_futures = ("leverage" in payload and payload["leverage"] is not None)
-        ticker     = payload["ticker"]
-        action     = payload["strategy"]["order_action"].upper()  # “SELL” if closing a long, “BUY” if closing a short
-
-        if is_futures:
-            # CANCEL any previous TP/SL/TS before we sell at market
-            self.cancel_related_orders(ticker)
-
-            # ----------------
-            #  FUTURES EXIT
-            # ----------------
-            # 1) Get current position to find entryPrice & qty
-            pos         = self.client.futures_position_information(symbol=ticker)[0]
-            position_amt = Decimal(pos["positionAmt"])
-            qty          = abs(position_amt)
-            entry_price  = Decimal(pos["entryPrice"])
-
-            if qty == 0:
-                logger.info(f"No open futures position for {ticker}, nothing to exit.")
-                return
-
-            # 2) Place MARKET exit
-            exit_order = self.client.futures_create_order(
+            resp_trail = self.client.futures_create_order(
                 symbol=ticker,
-                side=action,
-                type=FUTURE_ORDER_TYPE_MARKET,
-                quantity=self.format_val(qty, self.get_symbol_info(ticker)["quantity_precision"]),
+                side=("SELL" if new_action == "BUY" else "BUY"),
+                type=FUTURE_ORDER_TYPE_TRAILING_STOP_MARKET,
+                callbackRate=callback_rate_pct,
+                quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
                 reduceOnly=True
             )
-            exit_id = exit_order["orderId"]
-
-            # 3) Wait & fetch fill details + commission
-            time.sleep(2)
-            exit_info = self.client.futures_get_order(symbol=ticker, orderId=exit_id)
-            exit_price = Decimal(exit_info.get("avgPrice") or exit_info.get("price"))
-            filled_qty = Decimal(exit_info.get("executedQty", "0"))
-            commission, fee_asset = self.fetch_order_commission(ticker, exit_id)
-            logger.info(f"Futures exit {exit_id} filled at {exit_price}, qty={filled_qty}, fee={commission} {fee_asset}")
-
-            # 4) Compute P&L: (exitPrice - entryPrice) * qty for a long; inverse for a short.
-            if action == "SELL":
-                pnl = (exit_price - entry_price) * qty
-            else:  # “BUY” to close a short
-                pnl = (entry_price - exit_price) * qty
-
-            # 5) Log only net P&L (profit or loss)
-            if pnl >= 0:
-                self.log_transaction(
-                    "profit",
-                    f"{pnl:.8f}",    # USDT gained
-                    "USDT",
-                    "0.00000000",    # no BTC sent on a profit‐only line
-                    "",
-                    f"{commission:.8f}",
-                    fee_asset,
-                    ticker,
-                    f"Exit {exit_id}"
+            trail_id = resp_trail['orderId']
+            if raw_callback < 0.1:
+                logger.info(
+                    f"Placed TRAILING_STOP_MARKET (ID={trail_id}) with clamped callbackRate={callback_rate_pct}% "
+                    f"(raw {raw_callback:.6f}% was below minimum)"
                 )
             else:
-                loss_amt = abs(pnl)
-                self.log_transaction(
-                    "loss",
-                    "0.00000000",
-                    "",
-                    f"{loss_amt:.8f}",
-                    "USDT",
-                    f"{commission:.8f}",
-                    fee_asset,
-                    ticker,
-                    f"Exit {exit_id}"
-                )
+                logger.info(f"Placed TRAILING_STOP_MARKET (ID={trail_id}) callbackRate={callback_rate_pct}%")
 
-        else:
-            # ----------------
-            #   SPOT EXIT
-            # ----------------
-            order_price = Decimal(str(payload["bar"]["order_price"]))
-            symbol_info = self.get_symbol_info_spot(ticker)
+        # === 9) Monitor child exit orders to cancel siblings ===
+        child_ids = [oid for oid in (tp_id, sl_id, trail_id) if oid is not None]
+        if child_ids:
+            self.monitor_children_and_cancel(ticker, child_ids)
 
-            # 1a) Determine how much BTC we have to sell
-            base_asset = ticker.replace("USDT", "")  # e.g. "BTC"
-            balance = Decimal(self.client.get_asset_balance(asset=base_asset)["free"])
-            qty = self.adjust_to_step(balance, symbol_info["step_size"])
+        # === 10) Log the ENTRY transaction to CSV ===
+        commission, asset = self.fetch_order_commission(ticker, entry_id)
+        self.log_transaction(
+            "ENTER",
+            str(notional),
+            "USDT",
+            str(adjusted_qty),
+            ticker.replace("USDT", ""),
+            str(commission),
+            asset,
+            ticker,
+            f"Order {entry_id}"
+        )
 
-            if qty == 0:
-                logger.info(f"No open spot position ({base_asset}) to exit for {ticker}.")
-                return
+    def handle_exit_trade(self, payload):
+        """
+        Cancels any existing TP/SL/TS orders, then sends a MARKET reduce-only
+        to close the current position fully. Logs the exit commission and notional.
+        """
+        ticker      = payload['ticker']
+        action      = payload['strategy']['order_action'].upper()  # "BUY" or "SELL"
+        order_price = Decimal(str(payload['bar']['order_price']))
 
-            # 1b) Place a MARKET sell on spot
-            spot_order = self.client.create_order(
-                symbol=ticker,
-                side=action,  # “SELL”
-                type="MARKET",
-                quantity=self.format_val(qty, symbol_info["quantity_precision"])
-            )
-            exit_id = spot_order["orderId"]
+        # 1) Get current position size (absolute value)
+        positions = self.client.futures_position_information(symbol=ticker)
+        if not positions:
+            return  # nothing to exit
+        position = positions[0]
+        amount = abs(Decimal(position.get('positionAmt', '0')))
 
-            # 1c) Fetch fill details & commission
-            time.sleep(2)
-            exit_info = self.client.get_order(symbol=ticker, orderId=exit_id)
-            filled_qty = Decimal(exit_info["executedQty"])
-            exit_price = (Decimal(exit_info["cummulativeQuoteQty"]) / filled_qty) if filled_qty != 0 else order_price
-            commission, fee_asset = self.fetch_spot_commission(ticker, exit_id)
-            logger.info(f"Spot exit {exit_id} filled at {exit_price}, qty={filled_qty}, fee={commission} {fee_asset}")
+        symbol_info = self.get_symbol_info(ticker)
+        adjusted_qty = self.adjust_to_step(amount, symbol_info['step_size'])
 
-            # 2) Compute notional = exit_price × qty
-            notional = exit_price * filled_qty
+        # 2) Minimum-notional check
+        notional = adjusted_qty * order_price
+        if notional < Decimal(str(Config.MIN_NOTIONAL)):
+            raise ValueError("Exit trade value too low")
 
-            # 3) Log full notional spot exit
-            self.log_transaction(
-                "exit",
-                f"{notional:.8f}",         # Kvantitet mottatt (USDT)
-                "USDT",
-                f"{filled_qty:.8f}",       # Kvantitet sendt (BTC)
-                base_asset,
-                f"{commission:.8f}",
-                fee_asset,
-                ticker,
-                f"Exit {exit_id}"
-            )
+        # 3) Cancel any outstanding TP/SL/Trailing orders
+        self.cancel_related_orders(ticker)
+
+        # 4) Send MARKET order to close the full position
+        exit_order = self.client.futures_create_order(
+            symbol=ticker,
+            side=action,
+            type=FUTURE_ORDER_TYPE_MARKET,
+            quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
+            reduceOnly=True
+        )
+        logger.info(f"Exit trade executed for {ticker} with qty {adjusted_qty}")
+
+        # 5) Fetch commission for this exit order
+        commission, asset = self.fetch_order_commission(ticker, exit_order['orderId'])
+
+        # 6) Log the EXIT transaction
+        self.log_transaction(
+            "EXIT",
+            str(notional),
+            "USDT",
+            str(adjusted_qty),
+            ticker.replace("USDT", ""),
+            str(commission),
+            asset,
+            ticker,
+            f"Order {exit_order['orderId']}"
+        )
