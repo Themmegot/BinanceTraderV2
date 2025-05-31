@@ -145,65 +145,95 @@ class BinanceHelper:
 
     def handle_enter_trade(self, payload):
         ticker = payload['ticker']
-        action = payload['strategy']['order_action'].upper()   # "BUY" or "SELL"
+        new_action = payload['strategy']['order_action'].upper()   # "BUY" or "SELL"
         order_price = Decimal(str(payload['bar']['order_price']))
-        leverage = Decimal(str(payload['leverage']))
-        percent_equity = Decimal(str(payload['percent_of_equity'])) / Decimal('100')
+        leverage    = Decimal(str(payload['leverage']))
+        percent_eq  = Decimal(str(payload['percent_of_equity'])) / Decimal('100')
 
-        # === Read ROI‐based exit params ===
-        #  e.g. if payload["take_profit_percent"] == 10, that means "10% ROI"
-        tp_roi_pct = Decimal(str(payload.get('take_profit_percent', 0)))
-        sl_roi_pct = Decimal(str(payload.get('stop_loss_percent', 0)))
+        # 1) Read ROI‐based exit params from payload (if you’re using ROI logic)
+        tp_roi_pct    = Decimal(str(payload.get('take_profit_percent', 0)))
+        sl_roi_pct    = Decimal(str(payload.get('stop_loss_percent', 0)))
         trail_roi_pct = Decimal(str(payload.get('trailing_stop_percentage', 0)))
 
-        symbol_info = self.get_symbol_info(ticker)
-        adjusted_price = self.adjust_to_step(order_price, symbol_info['tick_size'])
+        # 2) Check current position on this symbol
+        pos_info = self.client.futures_position_information(symbol=ticker)[0]
+        current_amt = Decimal(pos_info['positionAmt'])    # e.g. "+0.5" means long 0.5; "-0.2" means short 0.2
 
-        # ... (set leverage, calculate qty, place LIMIT entry as before) ...
+        # 2a) If we have a long (positionAmt > 0) and new_action is "SELL", or
+        #     if we have a short (positionAmt < 0) and new_action is "BUY",
+        #     then we need to flatten/exit first
+        if current_amt > 0 and new_action == "SELL":
+            # We’re long but want to go short—so fully exit the long first:
+            self.handle_exit_trade({
+                'ticker': ticker,
+                'strategy': {'order_action': 'SELL'},   # SELL will close the long
+                'bar': {'order_price': order_price}
+            })
+            # Now wait until positionAmt becomes zero before placing new short:
+            while True:
+                pos_info = self.client.futures_position_information(symbol=ticker)[0]
+                if Decimal(pos_info['positionAmt']) == 0:
+                    break
+                time.sleep(1)  # poll every 1 second
+
+        elif current_amt < 0 and new_action == "BUY":
+            # We’re short but want to go long—exit short first:
+            self.handle_exit_trade({
+                'ticker': ticker,
+                'strategy': {'order_action': 'BUY'},    # BUY will close the short
+                'bar': {'order_price': order_price}
+            })
+            while True:
+                pos_info = self.client.futures_position_information(symbol=ticker)[0]
+                if Decimal(pos_info['positionAmt']) == 0:
+                    break
+                time.sleep(1)
+
+        # 3) At this point, we know there is no opposite position open.
+        #    Now proceed to open the new position just as before:
+
+        symbol_info   = self.get_symbol_info(ticker)
+        adjusted_price= self.adjust_to_step(order_price, symbol_info['tick_size'])
         self.client.futures_change_leverage(symbol=ticker, leverage=int(leverage))
+
         margin = Decimal(self.client.futures_account()['availableBalance'])
-        qty = (margin * leverage * percent_equity) / adjusted_price
+        qty    = (margin * leverage * percent_eq) / adjusted_price
         adjusted_qty = self.adjust_to_step(qty, symbol_info['step_size'])
 
         notional = adjusted_qty * adjusted_price
         if notional < Decimal(str(Config.MIN_NOTIONAL)):
             raise ValueError("Trade value too low")
 
-        order = self.client.futures_create_order(
+        # 4) Place your new limit entry
+        entry_order = self.client.futures_create_order(
             symbol=ticker,
-            side=action,
+            side=new_action,
             type=FUTURE_ORDER_TYPE_LIMIT,
             quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
             price=self.format_val(adjusted_price, symbol_info['price_precision']),
             timeInForce='GTC'
         )
-        entry_order_id = order['orderId']
-        logger.info(f"Enter trade LIMIT submitted: ID={entry_order_id} @ {adjusted_price}, qty={adjusted_qty}")
+        entry_id = entry_order['orderId']
+        logger.info(f"Entering {new_action} LIMIT for {ticker}: ID={entry_id}, price={adjusted_price}, qty={adjusted_qty}")
 
-        # Wait for it to fill (or timeout). Once filled, entry_price == adjusted_price.
-        self.poll_order_status(ticker, entry_order_id, action, adjusted_qty, adjusted_price, leverage)
+        # 5) Wait for fill (or fallback to market)
+        self.poll_order_status(ticker, entry_id, new_action, adjusted_qty, adjusted_price, leverage)
 
-        # === At this point, entry is filled at 'adjusted_price' ===
+        # 6) Now place ROI‐based TP/SL/TS orders (as in section 3.1)
         entry_price = adjusted_price
+        tp_id, sl_id, trail_id = None, None, None
 
-        # === Calculate price‐targets based on ROI ÷ Leverage ===
-
-        # 1) TAKE‐PROFIT‐PRICE (ROI‐based)
-        tp_order_id = None
+        # — Take‐Profit (ROI→price) —
         if tp_roi_pct > 0:
-            # For a LONG ("BUY"), price must go up => +; for a SHORT, price must go down => −
-            if action == "BUY":
-                # Price change % needed = tp_roi_pct / leverage
-                price_change_factor = (Decimal('1') + (tp_roi_pct / Decimal('100') / leverage))
-            else:  # "SELL" (short)
-                price_change_factor = (Decimal('1') - (tp_roi_pct / Decimal('100') / leverage))
-
-            take_profit_price = entry_price * price_change_factor
-            tp_price_adj = self.adjust_to_step(take_profit_price, symbol_info['tick_size'])
-
+            if new_action == "BUY":
+                factor_tp = (Decimal('1') + (tp_roi_pct / Decimal('100') / leverage))
+            else:  # "SELL"
+                factor_tp = (Decimal('1') - (tp_roi_pct / Decimal('100') / leverage))
+            tp_price = entry_price * factor_tp
+            tp_price_adj = self.adjust_to_step(tp_price, symbol_info['tick_size'])
             resp_tp = self.client.futures_create_order(
                 symbol=ticker,
-                side=("SELL" if action == "BUY" else "BUY"),
+                side=("SELL" if new_action == "BUY" else "BUY"),
                 type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
                 stopPrice=self.format_val(tp_price_adj, symbol_info['price_precision']),
                 closePosition=False,
@@ -211,23 +241,20 @@ class BinanceHelper:
                 reduceOnly=True,
                 timeInForce='GTC'
             )
-            tp_order_id = resp_tp['orderId']
-            logger.info(f"Placed TP_MARKET (ID={tp_order_id}) @ {tp_price_adj}")
+            tp_id = resp_tp['orderId']
+            logger.info(f"Placed TP_MARKET (ID={tp_id}) @ {tp_price_adj}")
 
-        # 2) STOP‐LOSS‐PRICE (ROI‐based)
-        sl_order_id = None
+        # — Stop‐Loss (ROI→price) —
         if sl_roi_pct > 0:
-            if action == "BUY":
-                price_change_factor = (Decimal('1') - (sl_roi_pct / Decimal('100') / leverage))
+            if new_action == "BUY":
+                factor_sl = (Decimal('1') - (sl_roi_pct / Decimal('100') / leverage))
             else:  # "SELL"
-                price_change_factor = (Decimal('1') + (sl_roi_pct / Decimal('100') / leverage))
-
-            stop_loss_price = entry_price * price_change_factor
-            sl_price_adj = self.adjust_to_step(stop_loss_price, symbol_info['tick_size'])
-
+                factor_sl = (Decimal('1') + (sl_roi_pct / Decimal('100') / leverage))
+            sl_price = entry_price * factor_sl
+            sl_price_adj = self.adjust_to_step(sl_price, symbol_info['tick_size'])
             resp_sl = self.client.futures_create_order(
                 symbol=ticker,
-                side=("SELL" if action == "BUY" else "BUY"),
+                side=("SELL" if new_action == "BUY" else "BUY"),
                 type=FUTURE_ORDER_TYPE_STOP_MARKET,
                 stopPrice=self.format_val(sl_price_adj, symbol_info['price_precision']),
                 closePosition=False,
@@ -235,34 +262,31 @@ class BinanceHelper:
                 reduceOnly=True,
                 timeInForce='GTC'
             )
-            sl_order_id = resp_sl['orderId']
-            logger.info(f"Placed SL_MARKET (ID={sl_order_id}) @ {sl_price_adj}")
+            sl_id = resp_sl['orderId']
+            logger.info(f"Placed SL_MARKET (ID={sl_id}) @ {sl_price_adj}")
 
-        # 3) TRAILING‐STOP (ROI => price‐percent callbackRate)
-        trail_order_id = None
+        # — Trailing‐Stop (ROI→callbackRate) —
         if trail_roi_pct > 0:
-            # The callbackRate for a trailing stop is a price‐percent, not ROI%.
-            # If user said "trailing_stop_percentage": 2, interpret that as "2% ROI"?
-            #    => price‐percent = 2/Leverage = 0.2% for a 10× position
-            callback_rate_pct = float(trail_roi_pct / leverage)  # e.g. 2 ROI ÷ 10x = 0.2%
+            # callbackRate = ROI% ÷ Leverage
+            cb_rate = float(trail_roi_pct / leverage)
             resp_trail = self.client.futures_create_order(
                 symbol=ticker,
-                side=("SELL" if action == "BUY" else "BUY"),
+                side=("SELL" if new_action == "BUY" else "BUY"),
                 type=FUTURE_ORDER_TYPE_TRAILING_STOP_MARKET,
-                callbackRate=callback_rate_pct,
+                callbackRate=cb_rate,
                 quantity=self.format_val(adjusted_qty, symbol_info['quantity_precision']),
                 reduceOnly=True
             )
-            trail_order_id = resp_trail['orderId']
-            logger.info(f"Placed TRAILING_STOP_MARKET (ID={trail_order_id}) with callbackRate={callback_rate_pct}%")
+            trail_id = resp_trail['orderId']
+            logger.info(f"Placed TRAILING_STOP_MARKET (ID={trail_id}) callbackRate={cb_rate}%")
 
-        # 4) Monitor those child orders so that when one fills, we cancel the rest:
-        child_ids = [i for i in (tp_order_id, sl_order_id, trail_order_id) if i is not None]
+        # 7) Monitor child exit orders to cancel siblings
+        child_ids = [x for x in (tp_id, sl_id, trail_id) if x is not None]
         if child_ids:
             self.monitor_children_and_cancel(ticker, child_ids)
 
-        # 5) Log the entry to your CSV
-        commission, asset = self.fetch_order_commission(ticker, entry_order_id)
+        # 8) Log the entry transaction
+        commission, asset = self.fetch_order_commission(ticker, entry_id)
         self.log_transaction(
             "ENTER",
             str(notional),
@@ -272,7 +296,7 @@ class BinanceHelper:
             str(commission),
             asset,
             ticker,
-            f"Order {entry_order_id}"
+            f"Order {entry_id}"
         )
 
     def monitor_children_and_cancel(self, ticker, child_order_ids, poll_interval=5):
