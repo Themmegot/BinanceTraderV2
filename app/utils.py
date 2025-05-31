@@ -206,7 +206,8 @@ class BinanceHelper:
         """
         Places a LIMIT entry based on payload, waits for it to fill, then places
         ROI-based TP/SL/Trailing‐Stop orders and monitors them. If an opposite-side
-        position already exists, flatten it first.
+        position already exists, flatten it first. Prevents pyramiding by skipping
+        same-direction signals when already in that direction.
         """
         ticker      = payload['ticker']
         new_action  = payload['strategy']['order_action'].upper()   # "BUY" or "SELL"
@@ -227,7 +228,15 @@ class BinanceHelper:
             pos_entry = positions[0]
             current_amt = Decimal(pos_entry.get('positionAmt', '0'))
 
-        # === 2) If opposite position exists, exit it first ===
+        # === 2) Prevent pyramiding: if already in same direction, skip ===
+        if current_amt > 0 and new_action == "BUY":
+            logger.info(f"Already long {current_amt}; skipping additional BUY signal.")
+            return
+        if current_amt < 0 and new_action == "SELL":
+            logger.info(f"Already short {current_amt}; skipping additional SELL signal.")
+            return
+
+        # === 3) If opposite position exists, exit it first ===
         if current_amt > 0 and new_action == "SELL":
             # We’re long but need to go short → flatten the long
             self.handle_exit_trade({
@@ -255,7 +264,7 @@ class BinanceHelper:
                     break
                 time.sleep(1)
 
-        # === 3) Now no opposite position remains; proceed to open new ===
+        # === 4) Now no opposite position remains; proceed to open new ===
         symbol_info    = self.get_symbol_info(ticker)
         adjusted_price = self.adjust_to_step(order_price, symbol_info['tick_size'])
         self.client.futures_change_leverage(symbol=ticker, leverage=int(leverage))
@@ -268,7 +277,7 @@ class BinanceHelper:
         if notional < Decimal(str(Config.MIN_NOTIONAL)):
             raise ValueError("Trade value too low")
 
-        # === 4) Place the new LIMIT entry order ===
+        # === 5) Place the new LIMIT entry order ===
         entry_order = self.client.futures_create_order(
             symbol=ticker,
             side=new_action,
@@ -280,13 +289,13 @@ class BinanceHelper:
         entry_id = entry_order['orderId']
         logger.info(f"Entering {new_action} LIMIT for {ticker}: ID={entry_id}, price={adjusted_price}, qty={adjusted_qty}")
 
-        # === 5) Wait for LIMIT to fill (or fallback to MARKET) ===
+        # === 6) Wait for LIMIT to fill (or fallback to MARKET) ===
         self.poll_order_status(ticker, entry_id, new_action, adjusted_qty, adjusted_price, leverage)
 
-        # === 6) Entry is now filled at 'adjusted_price' ===
+        # === 7) Entry is now filled at 'adjusted_price' ===
         entry_price = adjusted_price
 
-        # === 7) Place ROI-based TP / SL / Trailing-Stop orders ===
+        # === 8) Place ROI-based TP / SL / Trailing-Stop orders ===
         tp_id, sl_id, trail_id = None, None, None
 
         # — Take-Profit (ROI → price) —
@@ -335,8 +344,7 @@ class BinanceHelper:
 
         # — Trailing-Stop (ROI → callbackRate, clamped to ≥0.1%) —
         if trail_roi_pct > 0:
-            raw_callback = float(trail_roi_pct / leverage)     # e.g. 0.5 ÷ 75 ≈ 0.0067
-            # Binance minimum callbackRate is 0.1%
+            raw_callback = float(trail_roi_pct / leverage)     # e.g. 2% ROI at 20× → 0.1%
             callback_rate_pct = max(raw_callback, 0.1)
 
             resp_trail = self.client.futures_create_order(
@@ -356,12 +364,12 @@ class BinanceHelper:
             else:
                 logger.info(f"Placed TRAILING_STOP_MARKET (ID={trail_id}) callbackRate={callback_rate_pct}%")
 
-        # === 8) Monitor child exit orders to cancel siblings ===
+        # === 9) Monitor child exit orders to cancel siblings ===
         child_ids = [oid for oid in (tp_id, sl_id, trail_id) if oid is not None]
         if child_ids:
             self.monitor_children_and_cancel(ticker, child_ids)
 
-        # === 9) Log the ENTRY transaction to CSV ===
+        # === 10) Log the ENTRY transaction to CSV ===
         commission, asset = self.fetch_order_commission(ticker, entry_id)
         self.log_transaction(
             "ENTER",
@@ -374,7 +382,6 @@ class BinanceHelper:
             ticker,
             f"Order {entry_id}"
         )
-
 
     def handle_exit_trade(self, payload):
         """
