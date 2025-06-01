@@ -147,8 +147,6 @@ class BinanceHelper:
 
             time.sleep(poll_interval)
 
-from decimal import Decimal
-
     def poll_order_status(
         self,
         ticker,
