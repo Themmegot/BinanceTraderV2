@@ -147,6 +147,8 @@ class BinanceHelper:
 
             time.sleep(poll_interval)
 
+from decimal import Decimal
+
     def poll_order_status(
         self,
         ticker,
@@ -159,62 +161,76 @@ class BinanceHelper:
         stop_loss_percent=None,
         trailing_stop_percentage=None,
         max_wait=300
-    ):
+    ) -> Decimal:
         """
         Poll the LIMIT entry order (ID=order_id) every 15 seconds until one of:
-          - status == FILLED   → log commission, return
-          - status in [CANCELED, REJECTED, EXPIRED] → log and return
-          - timeout (elapsed >= max_wait) → cancel LIMIT, send fallback MARKET to enter
+          - status == FILLED   → fetch its avgPrice and return Decimal(avgPrice)
+          - status in [CANCELED, REJECTED, EXPIRED] → return adjusted_price (fallback)
+          - timeout (elapsed >= max_wait) → cancel LIMIT, send MARKET, fetch its avgPrice, return that
         """
-
         elapsed = 0
         interval = 15
 
         while elapsed < max_wait:
             try:
-                status = self.client.futures_get_order(symbol=ticker, orderId=order_id)['status']
+                resp = self.client.futures_get_order(symbol=ticker, orderId=order_id)
+                status = resp['status']
                 if status == 'FILLED':
-                    # Entry is filled: wait a moment, log commission, and return.
+                    # LIMIT filled. Fetch its fill price via 'avgPrice'.
+                    fill_price = Decimal(resp.get('avgPrice', resp.get('price', adjusted_price)))
+                    # Wait a moment so commissions/trades settle
                     time.sleep(5)
-                    commission, asset = self.fetch_order_commission(ticker, order_id)
-                    logger.info(f"Order {order_id} filled. Commission: {commission} {asset}")
-                    return
+                    self.fetch_order_commission(ticker, order_id)  # we already log commission elsewhere
+                    return fill_price
+
                 elif status in ['CANCELED', 'REJECTED', 'EXPIRED']:
-                    # The LIMIT was canceled, rejected, or expired: log and exit.
-                    logger.info(f"Order {order_id} status: {status}. Exiting poll.")
-                    return
+                    # The LIMIT never filled. We'll treat 'adjusted_price' as a fallback base.
+                    return adjusted_price
+
             except Exception as e:
                 error_logger.error(f"Polling error for order {order_id}: {e}")
-                return
+                return adjusted_price
 
             time.sleep(interval)
             elapsed += interval
 
-        # If we reach this point, the LIMIT never filled within `max_wait` seconds.
-        # Cancel the original LIMIT and send a fallback MARKET entry (without reduceOnly).
+        # If we reach here, LIMIT never filled in time → cancel LIMIT, send MARKET, then return its fill price.
         logger.warning(f"Order {order_id} not filled in time. Cancelling and sending fallback MARKET order.")
         try:
-            # Cancel the stale LIMIT
+            # 1) Cancel LIMIT
             self.client.futures_cancel_order(symbol=ticker, orderId=order_id)
 
-            # Place a MARKET order to enter the position.
-            # Note: remove reduceOnly=True so that this MARKET can actually open (or flip) a position.
-            self.client.futures_create_order(
+            # 2) Place MARKET order
+            market_resp = self.client.futures_create_order(
                 symbol=ticker,
                 side=action,
                 type=FUTURE_ORDER_TYPE_MARKET,
                 quantity=self.format_val(quantity, self.get_symbol_info(ticker)['quantity_precision'])
                 # ← no reduceOnly=True here
             )
-            logger.info(f"Fallback MARKET order for {ticker} placed.")
+            market_id = market_resp['orderId']
+
+            # 3) Immediately fetch the filled price of that MARKET order
+            #    (sometimes avgPrice is already in the response; if not, we do a get_order)
+            filled = market_resp.get('avgPrice')
+            if filled is None:
+                detail = self.client.futures_get_order(symbol=ticker, orderId=market_id)
+                filled = detail.get('avgPrice', adjusted_price)
+            fill_price = Decimal(filled)
+
+            logger.info(f"Fallback MARKET for {ticker} filled at {fill_price}")
+            return fill_price
+
         except Exception as e:
             error_logger.error(f"Fallback MARKET order failed: {e}")
+            # If something goes wrong, fallback to using original adjusted_price
+            return adjusted_price
 
 
     def handle_enter_trade(self, payload):
         """
-        Places a LIMIT entry based on payload, waits for it to fill, then places
-        ROI-based TP/SL/Trailing‐Stop orders and monitors them. If an opposite-side
+        Places a LIMIT entry based on payload, waits for it to fill (or falls back to MARKET),
+        then places ROI-based TP/SL/Trailing‐Stop orders and monitors them. If an opposite-side
         position already exists, flatten it first. Prevents pyramiding by skipping
         same-direction signals when already in that direction.
         """
@@ -298,13 +314,21 @@ class BinanceHelper:
         entry_id = entry_order['orderId']
         logger.info(f"Entering {new_action} LIMIT for {ticker}: ID={entry_id}, price={adjusted_price}, qty={adjusted_qty}")
 
-        # === 6) Wait for LIMIT to fill (or fallback to MARKET) ===
-        self.poll_order_status(ticker, entry_id, new_action, adjusted_qty, adjusted_price, leverage)
+        # === 6) Wait for LIMIT or fallback MARKET → capture the actual fill price ===
+        entry_price = self.poll_order_status(
+            ticker,
+            entry_id,
+            new_action,
+            adjusted_qty,
+            adjusted_price,
+            leverage,
+            take_profit_percent=tp_roi_pct,
+            stop_loss_percent=sl_roi_pct,
+            trailing_stop_percentage=trail_roi_pct
+        )
+        # Now `entry_price` is the true price the order filled at (Decimal).
 
-        # === 7) Entry is now filled at 'adjusted_price' ===
-        entry_price = adjusted_price
-
-        # === 8) Place ROI-based TP / SL / Trailing-Stop orders ===
+        # === 7) Place ROI-based TP / SL / Trailing-Stop orders ===
         tp_id, sl_id, trail_id = None, None, None
 
         # — Take-Profit (ROI → price) —
@@ -373,12 +397,12 @@ class BinanceHelper:
             else:
                 logger.info(f"Placed TRAILING_STOP_MARKET (ID={trail_id}) callbackRate={callback_rate_pct}%")
 
-        # === 9) Monitor child exit orders to cancel siblings ===
+        # === 8) Monitor child exit orders to cancel siblings ===
         child_ids = [oid for oid in (tp_id, sl_id, trail_id) if oid is not None]
         if child_ids:
             self.monitor_children_and_cancel(ticker, child_ids)
 
-        # === 10) Log the ENTRY transaction to CSV ===
+        # === 9) Log the ENTRY transaction to CSV ===
         commission, asset = self.fetch_order_commission(ticker, entry_id)
         self.log_transaction(
             "ENTER",
